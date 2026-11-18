@@ -1,0 +1,21 @@
+{
+    "name": "nera",
+    "owner": {
+        "name": "Michael Becker"
+    },
+    "metadata": {
+        "description": "Nera, the static site generator, for Claude Code"
+    },
+    "plugins": [
+        {
+            "name": "nera",
+            "description": "The Nera skill plus the Nera MCP server: create, edit, build, validate, preview and publish Nera websites inside one sites folder.",
+            "category": "development",
+            "homepage": "https://nera.js.org",
+            "source": {
+                "source": "npm",
+                "package": "@nera-static/mcp"
+            }
+        }
+    ]
+}
