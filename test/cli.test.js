@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
-import { validateSite } from '@nera-static/validate'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { validate } from '@nera-static/nera'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { connect, makeRoot, siteFiles, textOf, writeFiles } from './helpers.js'
 
 let env
@@ -34,49 +35,113 @@ afterEach(async () => {
 const exists = (file) => fs.access(file).then(() => true, () => false)
 
 describe('create_site', () => {
-    beforeEach(() => {
-        // `nera new <name>` leaves a site in <cwd>/<name>.
-        respond = async ({ args, cwd }) => {
-            await writeFiles(path.join(cwd, args[1]), siteFiles())
-            return { stdout: 'Created my-bakery\n## First steps\n' }
-        }
-    })
+    const STARTER = {
+        'package.json': JSON.stringify({
+            name: 'starter-mine',
+            nera: { starter: { label: 'Mine' } },
+            dependencies: { '@nera-static/nera': '^1.0.0', '@nera-static/plugin-tags': '^3.0.0' },
+        }),
+        'pages/index.md': '---\nlayout: pages/default.pug\ntitle: Mine\n---\n# Mine\n',
+        'README.md': '# Mine\n\n## First steps\n\n1. Edit pages/index.md.\n\n## More\n\nNot this.\n',
+    }
+    const readJson = async (file) => JSON.parse(await fs.readFile(file, 'utf8'))
 
-    it('runs `nera new` in the root with the options as separate --flag=value arguments', async () => {
-        const result = await mcp.call('create_site', {
-            name: 'my-bakery', starter: 'business', title: 'Bakery; rm -rf ~', lang: 'de',
-        })
+    it('writes the site with the CLI\'s createSite, then installs its packages through the runner', async () => {
+        const result = await mcp.call('create_site', { name: 'my-bakery', title: 'Bakery: "Brot"', lang: 'de' })
         expect(result.isError).toBeUndefined()
-        expect(calls).toEqual([{
-            command: 'nera',
-            args: ['new', 'my-bakery', '--yes', '--starter=business', '--name=Bakery; rm -rf ~', '--lang=de'],
-            cwd: env.root,
-        }])
-        expect(result.structuredContent).toEqual({ site: 'my-bakery', log: 'Created my-bakery\n## First steps' })
+        const dir = path.join(env.root, 'my-bakery')
+        expect(await exists(path.join(dir, 'pages/index.md'))).toBe(true)
+        expect(await exists(path.join(dir, 'AGENTS.md'))).toBe(true)
+        const appYaml = await fs.readFile(path.join(dir, 'config/app.yaml'), 'utf8')
+        expect(appYaml).toMatch(/^name: "Bakery: \\"Brot\\""$/m)
+        expect(appYaml).toMatch(/^lang: de$/m)
+        expect((await readJson(path.join(dir, 'package.json'))).name).toBe('my-bakery')
+        expect(calls).toEqual([{ command: 'npm', args: ['install'], cwd: dir }])
+        expect(signals[0]).toBeInstanceOf(AbortSignal)
+        expect(result.structuredContent).toMatchObject({ site: 'my-bakery', firstSteps: null })
+        expect(result.structuredContent.log).toMatch(/Creating a new Nera site/)
         expect(textOf(result)).toMatch(/get_site/)
     })
 
-    it('passes a theme, and a starter folder inside the root relative to it', async () => {
-        await writeFiles(path.join(env.root, 'starters', 'mine'), { 'package.json': '{}' })
-        await mcp.call('create_site', { name: 'a', starter: `${env.root}/starters/mine` })
-        await mcp.call('create_site', { name: 'b', theme: '@nera-static/theme-blog' })
-        await mcp.call('create_site', { name: 'c', starter: 'github:owner/repo#v1' })
-        expect(calls.map((c) => c.args)).toEqual([
-            ['new', 'a', '--yes', '--starter=./starters/mine'],
-            ['new', 'b', '--yes', '--theme=@nera-static/theme-blog'],
-            ['new', 'c', '--yes', '--starter=github:owner/repo#v1'],
-        ])
+    it('names a theme package on npm install, read from the written package.json', async () => {
+        const result = await mcp.call('create_site', { name: 'blog', theme: 'blog' })
+        expect(result.isError).toBeUndefined()
+        const dir = path.join(env.root, 'blog')
+        expect((await readJson(path.join(dir, 'package.json'))).dependencies['@nera-static/theme-blog']).toBe('latest')
+        expect(calls).toEqual([{ command: 'npm', args: ['install', '@nera-static/theme-blog'], cwd: dir }])
     })
 
-    it('creates the site in the root itself for `.`', async () => {
-        respond = async ({ cwd }) => {
-            await writeFiles(cwd, { 'package.json': '{}' })
-            return {}
-        }
-        const result = await mcp.call('create_site', { name: '.' })
+    it('applies a starter folder inside the root and returns its first steps', async () => {
+        await writeFiles(path.join(env.root, 'starters', 'mine'), STARTER)
+        const result = await mcp.call('create_site', { name: 'a', starter: `${env.root}/starters/mine` })
         expect(result.isError).toBeUndefined()
-        expect(calls[0]).toEqual({ command: 'nera', args: ['new', '.', '--yes'], cwd: env.root })
-        expect(result.structuredContent.site).toBe('.')
+        const dir = path.join(env.root, 'a')
+        expect(await fs.readFile(path.join(dir, 'pages/index.md'), 'utf8')).toMatch(/# Mine/)
+        expect((await readJson(path.join(dir, 'package.json'))).dependencies['@nera-static/plugin-tags']).toBe('^3.0.0')
+        expect(result.structuredContent.firstSteps).toBe('## First steps\n\n1. Edit pages/index.md.')
+        expect(textOf(result)).toMatch(/first steps \(in firstSteps\)/)
+        expect(calls).toEqual([{ command: 'npm', args: ['install'], cwd: dir }])
+    })
+
+    it('hands package and GitHub starters to createSite unchanged, with the root as cwd and no install', async () => {
+        const received = []
+        await mcp.close()
+        mcp = await connect(env.root, {
+            runner: fakeRunner,
+            createSite: async (name, options) => {
+                received.push({ name, ...options })
+                const dir = path.join(options.cwd, name)
+                await writeFiles(dir, siteFiles())
+                return { dir, firstSteps: null }
+            },
+        })
+        for (const starter of ['business', '@nera-static/starter-blog', 'github:owner/repo#v1', 'https://github.com/owner/repo']) {
+            const result = await mcp.call('create_site', { name: `s${received.length}`, starter })
+            expect(result.isError, starter).toBeUndefined()
+        }
+        expect(received.map((r) => r.starter)).toEqual(['business', '@nera-static/starter-blog', 'github:owner/repo#v1', 'https://github.com/owner/repo'])
+        for (const options of received) {
+            expect(options).toMatchObject({ cwd: env.root, install: false })
+            expect(options.log).toBeTypeOf('function')
+        }
+    })
+
+    it('creates the site in the root itself for `.`, which must be empty', async () => {
+        const empty = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'nera-mcp-empty-')))
+        const inRoot = await connect(empty, { runner: fakeRunner })
+        try {
+            const result = await inRoot.call('create_site', { name: '.' })
+            expect(result.isError).toBeUndefined()
+            expect(result.structuredContent.site).toBe('.')
+            expect(await exists(path.join(empty, 'package.json'))).toBe(true)
+            expect(calls).toEqual([{ command: 'npm', args: ['install'], cwd: empty }])
+        } finally {
+            await inRoot.close()
+            await fs.rm(empty, { recursive: true, force: true })
+        }
+    })
+
+    it('reports createSite\'s refusal of `.` in a root that is not empty', async () => {
+        const result = await mcp.call('create_site', { name: '.' })
+        expect(result.isError).toBe(true)
+        expect(textOf(result)).toMatch(/^Creating the site failed: The current folder is not empty \(site\)/)
+        expect(calls).toEqual([])
+    })
+
+    it('writes nothing to stdout: every progress line lands in the result', async () => {
+        await writeFiles(path.join(env.root, 'starters', 'mine'), STARTER)
+        const stdout = vi.spyOn(process.stdout, 'write')
+        const log = vi.spyOn(console, 'log')
+        try {
+            const result = await mcp.call('create_site', { name: 'quiet', starter: './starters/mine' })
+            expect(result.isError).toBeUndefined()
+            expect(result.structuredContent.log).toMatch(/Applied the "Mine" starter/)
+            expect(stdout).not.toHaveBeenCalled()
+            expect(log).not.toHaveBeenCalled()
+        } finally {
+            stdout.mockRestore()
+            log.mockRestore()
+        }
     })
 
     it.each([
@@ -108,6 +173,7 @@ describe('create_site', () => {
         expect(result.isError).toBe(true)
         expect(textOf(result)).toMatch(message)
         expect(calls).toEqual([])
+        expect(await exists(path.join(env.root, 'new'))).toBe(false)
     })
 
     it('refuses a theme that is not a package name', async () => {
@@ -117,18 +183,23 @@ describe('create_site', () => {
         expect(calls).toEqual([])
     })
 
-    it('reports the CLI\'s error when `nera new` fails', async () => {
-        respond = async () => ({ code: 1, stderr: '❌ Invalid language code "xx_".\n' })
-        const result = await mcp.call('create_site', { name: 'new', lang: 'xx_' })
+    it.each([
+        [{ lang: 'xx_' }, /^Creating the site failed: Invalid language "xx_"/],
+        [{ starter: 'blog', theme: 'blog' }, /^Creating the site failed: A starter brings its own theme/],
+        [{ starter: './starters/none' }, /^Creating the site failed: Starter folder "\.\/starters\/none" not found/],
+    ])('reports the CLI\'s refusal of %o and writes nothing', async (options, message) => {
+        const result = await mcp.call('create_site', { name: 'new', ...options })
         expect(result.isError).toBe(true)
-        expect(textOf(result)).toBe('Creating the site failed: ❌ Invalid language code "xx_".')
+        expect(textOf(result)).toMatch(message)
+        expect(calls).toEqual([])
+        expect(await exists(path.join(env.root, 'new'))).toBe(false)
     })
 
-    it('reports a failure when the CLI exits 0 but created no site', async () => {
-        respond = async () => ({ stdout: 'nothing' })
-        const result = await mcp.call('create_site', { name: 'new' })
+    it('reports a failed npm install with its error text', async () => {
+        respond = async () => ({ code: 1, stderr: 'npm error code ENOTFOUND\n' })
+        const result = await mcp.call('create_site', { name: 'offline' })
         expect(result.isError).toBe(true)
-        expect(textOf(result)).toMatch(/Creating the site failed: nothing/)
+        expect(textOf(result)).toMatch(/^The files of the site "offline" are written, but installing its packages failed: npm error code ENOTFOUND\nFix what npm reports/)
     })
 })
 
@@ -177,7 +248,7 @@ describe('validate', () => {
             'pages/broken.md': '---\nlayout: pages/missing.pug\n---\n',
         })
         const result = await mcp.call('validate', { site: 'site' })
-        const expected = validateSite({ cwd: env.site })
+        const expected = validate({ cwd: env.site })
         expect(expected.map((r) => r.rule).sort()).toEqual(['layout-missing', 'layout-unresolved'])
         expect(result.isError).toBeUndefined()
         expect(result.structuredContent).toEqual({ site: 'site', ok: false, results: expected })
@@ -272,14 +343,11 @@ describe('add_plugin', () => {
 describe('cancelling', () => {
     it('hands every command the request\'s abort signal, so a cancelled call or a closing server stops it', async () => {
         await writeFiles(path.join(env.site, 'node_modules/@nera-static/plugin-tags'), { 'package.json': '{"bin":{"x":"bin/publish-template.js"}}', 'bin/publish-template.js': '' })
-        respond = async ({ command, args, cwd }) => {
-            if (args[0] === 'new') await writeFiles(path.join(cwd, args[1]), siteFiles())
-            return command === 'nera' ? { stdout: '{"ok":true,"results":[]}' } : {}
-        }
+        respond = async ({ command }) => (command === 'nera' ? { stdout: '{"ok":true,"results":[]}' } : {})
         await mcp.call('create_site', { name: 'new-site' })
         await mcp.call('build', { site: 'site' })
         await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
-        expect(calls.map((c) => `${c.command} ${c.args[0]}`)).toEqual(['nera new', 'nera build', 'npm install', `node ${path.join(env.site, 'node_modules/@nera-static/plugin-tags/bin/publish-template.js')}`])
+        expect(calls.map((c) => `${c.command} ${c.args[0]}`)).toEqual(['npm install', 'nera build', 'npm install', `node ${path.join(env.site, 'node_modules/@nera-static/plugin-tags/bin/publish-template.js')}`])
         for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal)
     })
 })

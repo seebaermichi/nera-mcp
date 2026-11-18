@@ -70,6 +70,7 @@ export async function connect(root, options = {}) {
     const server = await createServer({
         root,
         runner: options.runner ?? (async () => { throw new Error('runner not expected in this test') }),
+        createSite: options.createSite,
         fetch: options.fetch ?? (async () => { throw new Error('fetch not expected in this test') }),
         docsFile: options.docsFile,
         processes: options.processes,

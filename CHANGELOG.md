@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-18
+
+### Added
+
+-   `create_site` returns the starter's `## First steps` (from its README) as `firstSteps`, `null` without a starter, and its text points to them.
+
+### Changed
+
+-   `create_site` writes the site with `createSite()` from `@nera-static/nera` inside the server instead of spawning `nera new`, then runs `npm install` as a cancellable command whose output is captured. Its inputs, checks and result shape are unchanged.
+-   `list_starters`, `list_themes`, `list_plugins` and the `nera://catalog/*` resources come from `listCatalog()` of `@nera-static/nera` instead of the server's own registry search. Offline, the starters fall back to the official list the CLI bundles; themes and plugins still report the registry error.
+-   `validate` calls `validate()` from `@nera-static/nera`, so it runs the validator version the CLI pins; its records are unchanged. `@nera-static/validate` is no longer a direct dependency.
+-   With `NERA_MCP_RUNTIME=bundled` (the Desktop extension), the shim folder also goes first on the server's own PATH, so a starter download inside `create_site` finds the bundled `npm`.
+-   Requires `@nera-static/nera` ^1.24.0 (was ^1.23.0), the first release with this API.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

@@ -100,8 +100,8 @@ A **site** is a folder under the root (or the root itself) whose `package.json` 
 
 | Tool | Does |
 | --- | --- |
-| `list_starters`, `list_themes`, `list_plugins` | The starter kits, themes and plugins on npm, official ones first |
-| `create_site` | Creates a site with `nera new` (`name`, optional `starter`, `theme`, `title`, `lang`) |
+| `list_starters`, `list_themes`, `list_plugins` | The starter kits, themes and plugins on npm, official ones first; offline, `list_starters` falls back to the official starters |
+| `create_site` | Creates a site as `nera new` does (`name`, optional `starter`, `theme`, `title`, `lang`) and installs its packages; returns the starter's first steps as `firstSteps` |
 | `list_sites` | The Nera sites under the root |
 | `get_site` | A site's configuration, pages, plugins and theme |
 | `read_page`, `write_page`, `delete_page` | A Markdown page with its frontmatter; `write_page` refuses frontmatter without `layout` |
@@ -112,7 +112,7 @@ A **site** is a folder under the root (or the root itself) whose `package.json` 
 | `preview` | Starts `nera dev` and returns the local address; `stop: true` stops it |
 | `publish` | `nera publish` to GitHub Pages or Netlify; returns the sign-in code for you, then the live address |
 
-The commands run through the site's own `@nera-static/nera` when it has one installed, so the assistant gets the same results as you do in a terminal. A preview or a publish keeps running between calls and stops when the client closes the server.
+`create_site`, `validate` and the catalogs call `@nera-static/nera`'s own functions inside the server; `build`, `preview`, `publish` and `add_plugin` run commands, through the site's own `@nera-static/nera` when it has one installed, so the assistant gets the same results as you do in a terminal. A preview or a publish keeps running between calls and stops when the client closes the server.
 
 ### Resources
 
@@ -136,12 +136,12 @@ The commands run through the site's own `@nera-static/nera` when it has one inst
 -   The server only touches files below `--root`. A path outside it is refused with an error, never quietly corrected.
 -   It never asks for input and never prompts in a terminal; long-running commands run in the background and are stopped when the server exits.
 -   `publish` signs in through GitHub's device flow: you enter the code in your browser. Tokens stay where `nera publish` keeps them (the system keychain, or a file only you can read) and are never returned to the assistant or written into a site.
--   The catalogs are read from the public npm registry. Nothing else leaves your computer unless you publish.
+-   The catalogs are read from the public npm registry (the starters fall back to the official list when it cannot be reached). `create_site` and `add_plugin` install packages from npm. Nothing else leaves your computer unless you publish.
 
 ## Compatibility
 
 -   Node.js 22.12 or later
--   Brings `@nera-static/nera` 1.23.0 for sites that have none installed. A site with its own CLI installed runs that one: `build` needs 1.9.0 or later (`--json`), `publish` 1.19.0 (1.20.0 for Netlify). `npm update` in the site brings it up to date.
+-   Brings `@nera-static/nera` 1.24.0 for sites that have none installed. A site with its own CLI installed runs that one: `build` needs 1.9.0 or later (`--json`), `publish` 1.19.0 (1.20.0 for Netlify). `npm update` in the site brings it up to date.
 
 ## License
 

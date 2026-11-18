@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { hasErrors, validateSite } from '@nera-static/validate'
+import { hasErrors, validate } from '@nera-static/nera'
 import { z } from 'zod'
 import { PathError, resolveInRoot } from '../paths.js'
 import { ok, tool, ToolError } from '../results.js'
@@ -41,9 +41,9 @@ function countBySeverity(results) {
 }
 
 /**
- * The `--starter` value for `nera new`: a package name as given, or a local
- * starter folder checked against the root and passed relative to it (the
- * command runs in the root).
+ * The `starter` for `createSite`: a package name as given, or a local starter
+ * folder checked against the root and passed relative to it (`createSite`
+ * runs with the root as its `cwd`).
  */
 async function starterArg(ctx, starter) {
     if (PACKAGE_SPEC.test(starter) || GITHUB_STARTER.test(starter)) {
@@ -114,15 +114,31 @@ async function publishTemplateScript(dir, packageDir) {
 }
 
 /**
+ * The packages a freshly written site still depends on as `latest` (the
+ * placeholder `createSite` writes for a `theme` package), read from its
+ * package.json. Naming them on `npm install` makes npm replace the
+ * placeholder with a caret range, as `nera new` does.
+ *
+ * @param {string} dir the site's folder
+ * @returns {Promise<string[]>}
+ */
+async function latestPlaceholders(dir) {
+    const pkg = JSON.parse(await fs.readFile(path.join(dir, 'package.json'), 'utf8'))
+    return Object.entries(pkg.dependencies ?? {})
+        .filter(([, range]) => range === 'latest')
+        .map(([name]) => name)
+}
+
+/**
  * Registers `create_site`, `build`, `validate` and `add_plugin`.
  *
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
- * @param {{ root: string, runner: ReturnType<typeof import('../runner.js').createRunner> }} ctx
+ * @param {{ root: string, runner: ReturnType<typeof import('../runner.js').createRunner>, createSite: typeof import('@nera-static/nera').createSite }} ctx
  */
 export function registerCliTools(server, ctx) {
     server.registerTool('create_site', {
         title: 'Create a Nera site',
-        description: 'Creates a new Nera static site in a new folder of the root folder (`nera new`), installs its packages and returns the folder to pass as `site` to every other tool. Pick a starter from list_starters (`blank`, `blog`, `business`, `portfolio`) to begin with sample pages and a theme, or a theme from list_themes; with neither you get a minimal site. This can take a minute (npm install). Afterwards call get_site, then edit pages with write_page.',
+        description: 'Creates a new Nera static site in a new folder of the root folder (like `nera new`), installs its packages and returns the folder to pass as `site` to every other tool. Pick a starter from list_starters (`blank`, `blog`, `business`, `portfolio`) to begin with sample pages and a theme, or a theme from list_themes; with neither you get a minimal site. This can take a minute (npm install). A starter\'s suggested first steps come back as `firstSteps`. Afterwards call get_site, then edit pages with write_page.',
         inputSchema: {
             name: z.string().describe('The new folder, created directly in the root: letters, digits, `.`, `-`, `_` (e.g. `my-bakery`). `.` creates the site in the root itself, which must then be empty.'),
             starter: z.string().optional().describe('A starter kit from list_starters, e.g. `blog` or `@nera-static/starter-business`. Leave out for a minimal site.'),
@@ -143,20 +159,33 @@ export function registerCliTools(server, ctx) {
             throw new ToolError(`Invalid theme "${theme}". Use a theme name from list_themes (e.g. \`blog\`) or a package name (\`@nera-static/theme-blog\`).`)
         }
 
-        const args = ['new', inRoot ? '.' : name, '--yes']
-        if (starter !== undefined) args.push(`--starter=${await starterArg(ctx, starter)}`)
-        if (theme !== undefined) args.push(`--theme=${theme}`)
-        if (title !== undefined) args.push(`--name=${title}`)
-        if (lang !== undefined) args.push(`--lang=${lang}`)
+        const spec = starter === undefined ? undefined : await starterArg(ctx, starter)
 
-        const run = await ctx.runner('nera', args, { cwd: ctx.root, signal })
-        if (run.code !== 0 || !await exists(path.join(target, 'package.json'))) {
-            throw new ToolError(`Creating the site failed: ${failureText(run)}`)
+        // Every progress line is collected for the result: stdout belongs to
+        // the protocol. The install runs below, through the runner, because
+        // createSite's own is synchronous (it would block the server) and
+        // cannot be cancelled.
+        const lines = []
+        let created
+        try {
+            created = await ctx.createSite(inRoot ? '.' : name, {
+                cwd: ctx.root, starter: spec, theme, name: title, lang, install: false, log: (line) => lines.push(line),
+            })
+        } catch (error) {
+            throw new ToolError(`Creating the site failed: ${error.message}`)
         }
         const site = relativeTo(ctx.root, target)
+
+        const install = await ctx.runner('npm', ['install', ...await latestPlaceholders(created.dir)], { cwd: created.dir, signal })
+        if (install.code !== 0) {
+            throw new ToolError(`The files of the site "${site}" are written, but installing its packages failed: ${failureText(install)}\nFix what npm reports (often the network connection), then run \`npm install\` in that folder, or call create_site again with another name.`)
+        }
+        const firstSteps = created.firstSteps ?? null
         return ok(
-            { site, log: tail(run.stdout) },
-            `Created the Nera site "${site}". Call get_site with site "${site}" to see its pages, then edit them with write_page.`,
+            { site, log: tail([...lines, install.stdout].join('\n')), firstSteps },
+            firstSteps
+                ? `Created the Nera site "${site}". Its starter suggests first steps (in firstSteps); follow them, starting with get_site with site "${site}".`
+                : `Created the Nera site "${site}". Call get_site with site "${site}" to see its pages, then edit them with write_page.`,
         )
     }))
 
@@ -195,7 +224,7 @@ export function registerCliTools(server, ctx) {
         annotations: { readOnlyHint: true },
     }, tool(async ({ site }) => {
         const resolved = await resolveSite(ctx, site)
-        const results = validateSite({ cwd: resolved.dir })
+        const results = validate({ cwd: resolved.dir })
         const { errors, warnings } = countBySeverity(results)
         const text = results.length
             ? `"${resolved.site}" has ${errors} error(s) and ${warnings} warning(s); each message says how to fix it.`
