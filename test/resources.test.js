@@ -145,10 +145,10 @@ describe('prompts', () => {
         for (const prompt of prompts) expect(prompt.description.length).toBeGreaterThan(40)
     })
 
-    it('names only tools that exist (preview and publish arrive with their step)', async () => {
+    it('names only tools that exist', async () => {
         await open()
         const { tools } = await mcp.client.listTools()
-        const known = new Set([...tools.map((t) => t.name), 'preview', 'publish'])
+        const known = new Set(tools.map((t) => t.name))
         const { prompts } = await mcp.client.listPrompts()
         for (const { name } of prompts) {
             const { messages } = await mcp.client.getPrompt({ name, arguments: {} })

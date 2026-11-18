@@ -25,8 +25,13 @@ function tail(text) {
     return trimmed.length > LOG_TAIL ? `…${trimmed.slice(-LOG_TAIL)}` : trimmed
 }
 
-/** The command's own error text (its stderr, else its stdout), for a failure message. */
-function failureText(run) {
+/**
+ * The command's own error text (its stderr, else its stdout), for a failure message.
+ *
+ * @param {{ code: number|null, stdout: string, stderr: string }} run
+ * @returns {string}
+ */
+export function failureText(run) {
     return tail(run.stderr) || tail(run.stdout) || `exit code ${run.code}`
 }
 
@@ -125,7 +130,7 @@ export function registerCliTools(server, ctx) {
             title: z.string().optional().describe('The site\'s name as visitors see it (written to config/app.yaml).'),
             lang: z.string().optional().describe('The site\'s language code, e.g. `en` or `de`.'),
         },
-    }, tool(async ({ name, starter, theme, title, lang }) => {
+    }, tool(async ({ name, starter, theme, title, lang }, { signal }) => {
         const inRoot = name === '.' || name === './'
         if (!inRoot && !SITE_FOLDER.test(name)) {
             throw new ToolError(`Invalid site folder "${name}". Use one folder name made of letters, digits, \`.\`, \`-\` and \`_\`, starting with a letter or digit (e.g. \`my-site\`), or \`.\` for the root itself.`)
@@ -144,7 +149,7 @@ export function registerCliTools(server, ctx) {
         if (title !== undefined) args.push(`--name=${title}`)
         if (lang !== undefined) args.push(`--lang=${lang}`)
 
-        const run = await ctx.runner('nera', args, { cwd: ctx.root })
+        const run = await ctx.runner('nera', args, { cwd: ctx.root, signal })
         if (run.code !== 0 || !await exists(path.join(target, 'package.json'))) {
             throw new ToolError(`Creating the site failed: ${failureText(run)}`)
         }
@@ -162,10 +167,10 @@ export function registerCliTools(server, ctx) {
             site: siteInput,
             check: z.boolean().optional().describe('Also check the built HTML (accessibility, privacy, legal hints). Default false.'),
         },
-    }, tool(async ({ site, check = false }) => {
+    }, tool(async ({ site, check = false }, { signal }) => {
         const resolved = await resolveSite(ctx, site)
         const args = ['build', '--json', ...(check ? ['--check'] : [])]
-        const run = await ctx.runner('nera', args, { cwd: resolved.dir })
+        const run = await ctx.runner('nera', args, { cwd: resolved.dir, signal })
         let parsed
         try {
             parsed = JSON.parse(run.stdout)
@@ -205,10 +210,10 @@ export function registerCliTools(server, ctx) {
             site: siteInput,
             plugin: z.string().describe('The plugin, as `@nera-static/plugin-<name>` or just `<name>` (e.g. `sitemap`, `tags`).'),
         },
-    }, tool(async ({ site, plugin }) => {
+    }, tool(async ({ site, plugin }, { signal }) => {
         const { name, pkg } = pluginPackage(plugin)
         const resolved = await resolveSite(ctx, site)
-        const install = await ctx.runner('npm', ['install', pkg], { cwd: resolved.dir })
+        const install = await ctx.runner('npm', ['install', pkg], { cwd: resolved.dir, signal })
         if (install.code !== 0) {
             throw new ToolError(`Installing ${pkg} failed: ${failureText(install)}`)
         }
@@ -220,7 +225,7 @@ export function registerCliTools(server, ctx) {
         let templates = 'none'
         const script = await publishTemplateScript(resolved.dir, packageDir)
         if (script) {
-            const publish = await ctx.runner('node', [script], { cwd: resolved.dir })
+            const publish = await ctx.runner('node', [script], { cwd: resolved.dir, signal })
             if (publish.code !== 0) {
                 throw new ToolError(`${pkg} is installed, but copying its templates failed: ${failureText(publish)}`)
             }

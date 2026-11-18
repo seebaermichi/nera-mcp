@@ -70,6 +70,8 @@ export async function connect(root, options = {}) {
         runner: options.runner ?? (async () => { throw new Error('runner not expected in this test') }),
         fetch: options.fetch ?? (async () => { throw new Error('fetch not expected in this test') }),
         docsFile: options.docsFile,
+        processes: options.processes,
+        timing: options.timing,
     })
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     const client = new Client({ name: 'nera-mcp-test', version: '0.0.0' })

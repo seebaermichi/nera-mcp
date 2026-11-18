@@ -48,6 +48,39 @@ describe('createRunner', () => {
         expect(run.stderr).toMatch(/Stopped after 0.2 s\./)
     })
 
+    it('escalates to SIGKILL when a run ignores SIGTERM, and stops what it started too', async () => {
+        const script = [
+            'process.on("SIGTERM", () => {})',
+            'const child = require("node:child_process").spawn(process.execPath, ["-e", "process.on(\'SIGTERM\', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" })',
+            'console.log(child.pid)',
+            'setInterval(() => {}, 1000)',
+        ].join(';')
+        const started = Date.now()
+        const run = await createRunner({ timeout: 300, grace: 200 })('node', ['-e', script], { cwd: env.site })
+
+        expect(Date.now() - started).toBeLessThan(5000)
+        expect(run).toMatchObject({ code: null, timedOut: true })
+        const grandchild = Number(run.stdout)
+        expect(grandchild).toBeGreaterThan(0)
+        expect(await gone(grandchild)).toBe(true)
+    })
+
+    it('stops a run when its signal aborts (the request was cancelled or the server closed)', async () => {
+        const controller = new AbortController()
+        const pending = createRunner()('node', ['-e', 'setTimeout(() => {}, 20000)'], { cwd: env.site, signal: controller.signal })
+        setTimeout(() => controller.abort(), 100)
+        const run = await pending
+        expect(run).toMatchObject({ code: null, timedOut: false, cancelled: true })
+        expect(run.stderr).toMatch(/Cancelled\.$/)
+    })
+
+    it('does not start a run whose signal has already aborted', async () => {
+        const spawn = vi.fn()
+        const run = await createRunner({ spawn })('node', [], { cwd: env.site, signal: AbortSignal.abort() })
+        expect(spawn).not.toHaveBeenCalled()
+        expect(run).toMatchObject({ code: null, cancelled: true })
+    })
+
     it('reports a command that cannot start instead of throwing', async () => {
         const run = await createRunner()('node', [], { cwd: path.join(env.tmp, 'missing') })
         expect(run.code).toBeNull()
@@ -68,6 +101,20 @@ describe('createRunner', () => {
         await expect(createRunner()('sh', ['-c', 'true'], { cwd: env.site })).rejects.toThrow(/nera, npm or node only/)
     })
 })
+
+/** True once `pid` no longer exists (polled, at most 5 s). */
+async function gone(pid) {
+    const end = Date.now() + 5000
+    for (;;) {
+        try {
+            process.kill(pid, 0)
+        } catch {
+            return true
+        }
+        if (Date.now() > end) return false
+        await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+}
 
 describe('neraBin', () => {
     it('prefers the site\'s own CLI and falls back to the one this server depends on', async () => {

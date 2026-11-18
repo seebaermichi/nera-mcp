@@ -8,17 +8,20 @@ let env
 let mcp
 let calls
 let respond
+let signals
 
 /** A fake runner: records every call, answers with `respond(call)` (default: success, no output). */
 async function fakeRunner(command, args, options) {
     const call = { command, args, cwd: options.cwd }
     calls.push(call)
+    signals.push(options.signal)
     return { code: 0, stdout: '', stderr: '', timedOut: false, ...(await respond(call)) }
 }
 
 beforeEach(async () => {
     env = await makeRoot()
     calls = []
+    signals = []
     respond = async () => ({})
     mcp = await connect(env.root, { runner: fakeRunner })
 })
@@ -263,6 +266,21 @@ describe('add_plugin', () => {
         expect(result.isError).toBe(true)
         expect(textOf(result)).toBe('Installing @nera-static/plugin-nope failed: npm error 404 Not Found')
         expect(await exists(path.join(env.site, 'config', 'nope.yaml'))).toBe(false)
+    })
+})
+
+describe('cancelling', () => {
+    it('hands every command the request\'s abort signal, so a cancelled call or a closing server stops it', async () => {
+        await writeFiles(path.join(env.site, 'node_modules/@nera-static/plugin-tags'), { 'package.json': '{"bin":{"x":"bin/publish-template.js"}}', 'bin/publish-template.js': '' })
+        respond = async ({ command, args, cwd }) => {
+            if (args[0] === 'new') await writeFiles(path.join(cwd, args[1]), siteFiles())
+            return command === 'nera' ? { stdout: '{"ok":true,"results":[]}' } : {}
+        }
+        await mcp.call('create_site', { name: 'new-site' })
+        await mcp.call('build', { site: 'site' })
+        await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+        expect(calls.map((c) => `${c.command} ${c.args[0]}`)).toEqual(['nera new', 'nera build', 'npm install', `node ${path.join(env.site, 'node_modules/@nera-static/plugin-tags/bin/publish-template.js')}`])
+        for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal)
     })
 })
 
