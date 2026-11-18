@@ -4,6 +4,7 @@
     "description": "A local MCP server for Nera: lets an AI assistant create, edit, build, validate, preview and publish Nera static sites under one folder",
     "type": "module",
     "files": [
+        ".claude-plugin/icon.png",
         ".claude-plugin/plugin.json",
         "bin",
         "docs",

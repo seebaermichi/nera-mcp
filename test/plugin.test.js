@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import pkg from '../package.json' with { type: 'json' }
-import { ROOT, TEMPLATE } from '../scripts/build-mcpb.js'
+import { ICON, ROOT, TEMPLATE } from '../scripts/build-mcpb.js'
 import { SKILL_SOURCE, SKILL_TARGET, syncSkill } from '../scripts/sync-skill.js'
 import { PLUGIN_MANIFEST, serverSpec, syncVersion } from '../scripts/sync-version.js'
 
@@ -43,6 +43,11 @@ describe('the plugin manifest', () => {
     it('asks for the sites folder on enable, as the Desktop extension does', () => {
         expect(plugin.userConfig.root).toEqual(mcpbTemplate.user_config.root)
         expect(plugin.userConfig.root).toMatchObject({ type: 'directory', required: true })
+    })
+
+    it('has the icon of the extension, by a path inside the plugin', () => {
+        expect(plugin.icon).toMatch(/^\.\//)
+        expect(path.resolve(ROOT, plugin.icon)).toBe(ICON)
     })
 
     it('is named nera', () => {
@@ -128,8 +133,9 @@ describe('syncSkill', () => {
 })
 
 describe('the package, which is the plugin root', () => {
-    it('ships the plugin manifest and the skill, and nothing internal', () => {
+    it('ships the plugin manifest, its icon and the skill, and nothing internal', () => {
         expect(pkg.files).toEqual(expect.arrayContaining(['.claude-plugin/plugin.json', 'skills']))
+        expect(pkg.files).toContain(path.relative(ROOT, path.resolve(ROOT, plugin.icon)).split(path.sep).join('/'))
         for (const internal of ['.claude', '.claude-plugin', '.mcp.json', 'plans', 'mcpb', 'scripts', 'test']) {
             expect(pkg.files, internal).not.toContain(internal)
         }

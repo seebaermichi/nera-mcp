@@ -24,8 +24,12 @@ import { createServer } from '../src/server.js'
 export const ROOT = fileURLToPath(new URL('..', import.meta.url))
 /** The manifest template: everything the server and package.json do not say. */
 export const TEMPLATE = path.join(ROOT, 'mcpb', 'manifest.json')
-/** The extension's icon (nera.js.org's apple-touch-icon). */
-export const ICON = path.join(ROOT, 'mcpb', 'icon.png')
+/**
+ * The icon of the extension and the Claude Code plugin: nera.js.org's
+ * favicon mark in its light fill, 512×512 (the plugin directory's minimum),
+ * rendered once by hand from nera-website's theme/assets/favicon.svg.
+ */
+export const ICON = path.join(ROOT, '.claude-plugin', 'icon.png')
 /** What the bundle takes from the repository, besides the manifest and icon. */
 export const STAGED = ['bin', 'src', 'docs', 'package.json', 'package-lock.json', 'LICENSE', 'README.md']
 /**

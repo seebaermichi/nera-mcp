@@ -8,7 +8,7 @@ import {
     ICON, ROOT, STAGED, TEMPLATE, buildManifest, bundleName, firstSentence, serverCatalog,
 } from '../scripts/build-mcpb.js'
 import { BUNDLED, RUNTIME_ENV } from '../src/runtime.js'
-import { connect, makeRoot } from './helpers.js'
+import { connect, makeRoot, pngSize } from './helpers.js'
 
 let env
 let template
@@ -73,6 +73,22 @@ describe('the manifest template', () => {
         for (const entry of STAGED.filter((name) => name !== 'docs')) {
             expect(existsSync(path.join(ROOT, entry)), entry).toBe(true)
         }
+    })
+})
+
+describe('the icon', () => {
+    it('is a square 512×512 PNG, the size the plugin directory asks for', async () => {
+        expect(pngSize(await fs.readFile(ICON))).toEqual({ width: 512, height: 512 })
+    })
+
+    it('goes into the bundle under the name the manifest gives', () => {
+        expect(template.icon).toBe('icon.png')
+    })
+})
+
+describe('pngSize', () => {
+    it('is null for bytes that are not a PNG', () => {
+        expect(pngSize(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'))).toBeNull()
     })
 })
 

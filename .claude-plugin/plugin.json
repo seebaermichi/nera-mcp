@@ -8,6 +8,7 @@
     "homepage": "https://nera.js.org",
     "repository": "https://github.com/seebaermichi/nera-mcp",
     "license": "MIT",
+    "icon": "./.claude-plugin/icon.png",
     "keywords": [
         "nera",
         "static-site-generator",
