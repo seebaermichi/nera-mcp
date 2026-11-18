@@ -50,3 +50,6 @@ plans/
 /.mcp.json
 /ROADMAP*.md
 /DESIGN-BRIEF.md
+
+# Bundled docs (downloaded on prepack by scripts/fetch-docs.js)
+/docs/

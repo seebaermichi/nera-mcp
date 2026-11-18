@@ -19,11 +19,12 @@ afterEach(async () => {
 const read = (file) => fs.readFile(path.join(env.site, file), 'utf8')
 
 describe('createServer', () => {
-    it('lists the site, file and CLI tools, each with a description and an input schema', async () => {
+    it('lists the site, file, CLI and catalog tools, each with a description and an input schema', async () => {
         const { tools } = await mcp.client.listTools()
         expect(tools.map((t) => t.name).sort()).toEqual([
-            'add_plugin', 'build', 'create_site', 'delete_page', 'get_site', 'list_sites',
-            'read_file', 'read_page', 'validate', 'write_file', 'write_page',
+            'add_plugin', 'build', 'create_site', 'delete_page', 'get_site', 'list_plugins',
+            'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page', 'validate',
+            'write_file', 'write_page',
         ])
         for (const t of tools) {
             expect(t.description.length).toBeGreaterThan(80)

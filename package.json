@@ -5,12 +5,14 @@
     "type": "module",
     "files": [
         "bin",
+        "docs",
         "src",
         "CHANGELOG.md"
     ],
     "scripts": {
         "lint": "eslint .",
-        "test": "vitest"
+        "test": "vitest",
+        "prepack": "node scripts/fetch-docs.js"
     },
     "keywords": [
         "nera",

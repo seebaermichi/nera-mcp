@@ -102,7 +102,7 @@ async function listPages(dir, pagesDir) {
  * without descending into a site, `node_modules`, `public` or hidden folders
  * or following symbolic links.
  */
-async function findSites(root) {
+export async function findSites(root) {
     const found = []
     async function visit(dir, depth) {
         const pkg = await readPackage(dir)
