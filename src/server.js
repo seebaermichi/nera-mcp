@@ -1,6 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import pkg from '../package.json' with { type: 'json' }
 import { realRoot } from './paths.js'
+import { createRunner } from './runner.js'
+import { registerCliTools } from './tools/cli.js'
 import { registerFileTools } from './tools/files.js'
 import { registerSiteTools } from './tools/sites.js'
 
@@ -11,12 +13,12 @@ import { registerSiteTools } from './tools/sites.js'
  *
  * @param {object} options
  * @param {string} options.root the folder the server may work in; every path a tool takes is checked against it
- * @param {Function} [options.runner] runs the `nera` and `npm` commands (injected so tests spawn nothing)
+ * @param {ReturnType<typeof createRunner>} [options.runner] runs the `nera`, `npm` and `node` commands (injected so tests spawn nothing)
  * @param {typeof fetch} [options.fetch] fetches the npm registry catalogs (injected so tests stay offline)
  * @returns {Promise<McpServer>}
  * @throws {import('./paths.js').PathError} when `root` does not exist or is not a folder
  */
-export async function createServer({ root, runner, fetch = globalThis.fetch }) {
+export async function createServer({ root, runner = createRunner(), fetch = globalThis.fetch }) {
     const ctx = { root: await realRoot(root), runner, fetch }
     const server = new McpServer(
         { name: pkg.name, version: pkg.version },
@@ -26,5 +28,6 @@ export async function createServer({ root, runner, fetch = globalThis.fetch }) {
     )
     registerSiteTools(server, ctx)
     registerFileTools(server, ctx)
+    registerCliTools(server, ctx)
     return server
 }
