@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
-import { KINDS, loadCatalog } from './catalog.js'
+import { KINDS, readCatalog } from './catalog.js'
 import { PathError, resolveInRoot } from './paths.js'
 import { ToolError } from './results.js'
 import { findSites, resolveSite } from './tools/sites.js'
@@ -80,7 +80,7 @@ export function registerResources(server, ctx) {
             description: `The Nera ${KINDS[kindName].title} on npm as JSON, official ones first (the same list as the list_${kindName} tool).`,
             mimeType: 'application/json',
         }, resource(async (uri) => {
-            const items = await loadCatalog(ctx.fetch, kindName)
+            const items = await readCatalog(ctx, kindName)
             return text(uri, 'application/json', JSON.stringify({ [kindName]: items }, null, 2))
         }))
     }

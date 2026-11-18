@@ -1,6 +1,8 @@
+import { BUNDLED_STARTERS } from '@nera-static/nera'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { REGISTRY_SEARCH } from '../src/catalog.js'
 import { connect, makeRoot, textOf } from './helpers.js'
+
+const REGISTRY_SEARCH = 'https://registry.npmjs.org/-/v1/search'
 
 let env
 let mcp
@@ -130,11 +132,27 @@ describe('list_themes', () => {
 })
 
 describe('registry failures', () => {
-    it('reports an unreachable registry as an isError result', async () => {
+    it('lists the official starters bundled with the CLI when the registry cannot be reached', async () => {
         answer = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
         const result = await mcp.call('list_starters')
-        expect(result.isError).toBe(true)
-        expect(textOf(result)).toMatch(/npm registry could not be reached \(getaddrinfo ENOTFOUND/)
+        expect(result.isError).toBeUndefined()
+        expect(BUNDLED_STARTERS.length).toBeGreaterThan(0)
+        expect(result.structuredContent.starters).toEqual(BUNDLED_STARTERS.map(({ name, package: pkg }) => expect.objectContaining({
+            name,
+            package: pkg,
+            version: null,
+            official: true,
+        })))
+        expect(textOf(result)).toMatch(/create_site/)
+    })
+
+    it('reports an unreachable registry as an isError result for themes and plugins', async () => {
+        answer = async () => { throw new Error('getaddrinfo ENOTFOUND registry.npmjs.org') }
+        for (const name of ['list_themes', 'list_plugins']) {
+            const result = await mcp.call(name)
+            expect(result.isError).toBe(true)
+            expect(textOf(result)).toMatch(/npm registry could not be reached \(getaddrinfo ENOTFOUND/)
+        }
     })
 
     it('reports an HTTP error as an isError result', async () => {

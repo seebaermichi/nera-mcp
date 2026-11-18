@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { BUNDLED_STARTERS } from '@nera-static/nera'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fetchDocs } from '../scripts/fetch-docs.js'
 import { DOCS_URL } from '../src/resources.js'
@@ -61,6 +62,15 @@ describe('nera://catalog/*', () => {
     it('reports an unreachable registry as a resource error with our message', async () => {
         await open({ fetch: async () => { throw new Error('offline') } })
         await expect(read('nera://catalog/plugins')).rejects.toThrow(/npm registry could not be reached \(offline\)/)
+        await expect(read('nera://catalog/themes')).rejects.toThrow(/npm registry could not be reached \(offline\)/)
+    })
+
+    it('serves the official starters bundled with the CLI when the registry cannot be reached', async () => {
+        await open({ fetch: async () => { throw new Error('offline') } })
+        const { contents } = await read('nera://catalog/starters')
+        const { starters } = JSON.parse(contents[0].text)
+        expect(starters.map((item) => item.package)).toEqual(BUNDLED_STARTERS.map((item) => item.package))
+        expect(starters.every((item) => item.official)).toBe(true)
     })
 })
 
