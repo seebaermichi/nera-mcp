@@ -4,6 +4,7 @@ import { hasErrors, validate } from '@nera-static/nera'
 import { z } from 'zod'
 import { PathError, resolveInRoot } from '../paths.js'
 import { ok, tool, ToolError } from '../results.js'
+import { childEnv } from '../runner.js'
 import { relativeTo, resolveSite, siteFolders, siteInput } from './sites.js'
 
 const PLUGIN_SCOPE = '@nera-static/'
@@ -114,26 +115,10 @@ async function publishTemplateScript(dir, packageDir) {
 }
 
 /**
- * The packages a freshly written site still depends on as `latest` (the
- * placeholder `createSite` writes for a `theme` package), read from its
- * package.json. Naming them on `npm install` makes npm replace the
- * placeholder with a caret range, as `nera new` does.
- *
- * @param {string} dir the site's folder
- * @returns {Promise<string[]>}
- */
-async function latestPlaceholders(dir) {
-    const pkg = JSON.parse(await fs.readFile(path.join(dir, 'package.json'), 'utf8'))
-    return Object.entries(pkg.dependencies ?? {})
-        .filter(([, range]) => range === 'latest')
-        .map(([name]) => name)
-}
-
-/**
  * Registers `create_site`, `build`, `validate` and `add_plugin`.
  *
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
- * @param {{ root: string, runner: ReturnType<typeof import('../runner.js').createRunner>, createSite: typeof import('@nera-static/nera').createSite }} ctx
+ * @param {{ root: string, runner: ReturnType<typeof import('../runner.js').createRunner>, createSite: typeof import('@nera-static/nera').createSite }} ctx `create_site` installs through `createSite`, the other tools through `runner`
  */
 export function registerCliTools(server, ctx) {
     server.registerTool('create_site', {
@@ -161,28 +146,31 @@ export function registerCliTools(server, ctx) {
 
         const spec = starter === undefined ? undefined : await starterArg(ctx, starter)
 
-        // Every progress line is collected for the result: stdout belongs to
-        // the protocol. The install runs below, through the runner, because
-        // createSite's own is synchronous (it would block the server) and
-        // cannot be cancelled.
+        // Every progress line is collected for the result and npm install's
+        // output goes to stderr (createSite's default): stdout belongs to the
+        // protocol. `env` is a child's (the shim first under the bundled
+        // runtime) and reaches createSite's own children; the call's signal
+        // stops them.
+        const site = relativeTo(ctx.root, target)
         const lines = []
         let created
         try {
             created = await ctx.createSite(inRoot ? '.' : name, {
-                cwd: ctx.root, starter: spec, theme, name: title, lang, install: false, log: (line) => lines.push(line),
+                cwd: ctx.root, starter: spec, theme, name: title, lang,
+                install: true, signal, env: childEnv(), log: (line) => lines.push(line),
             })
         } catch (error) {
+            // A failed install keeps the written site (npm install can be
+            // rerun there); after anything else, an abort included,
+            // createSite has removed a new folder again.
+            if (!signal.aborted && typeof error.code === 'number' && await exists(path.join(target, 'package.json'))) {
+                throw new ToolError(`The files of the site "${site}" are written, but installing its packages failed: ${error.message}\nnpm's own output is in the server's log. Fix what npm reports (often the network connection), then run \`npm install\` in that folder, or call create_site again with another name.`)
+            }
             throw new ToolError(`Creating the site failed: ${error.message}`)
-        }
-        const site = relativeTo(ctx.root, target)
-
-        const install = await ctx.runner('npm', ['install', ...await latestPlaceholders(created.dir)], { cwd: created.dir, signal })
-        if (install.code !== 0) {
-            throw new ToolError(`The files of the site "${site}" are written, but installing its packages failed: ${failureText(install)}\nFix what npm reports (often the network connection), then run \`npm install\` in that folder, or call create_site again with another name.`)
         }
         const firstSteps = created.firstSteps ?? null
         return ok(
-            { site, log: tail([...lines, install.stdout].join('\n')), firstSteps },
+            { site, log: tail(lines.join('\n')), firstSteps },
             firstSteps
                 ? `Created the Nera site "${site}". Its starter suggests first steps (in firstSteps); follow them, starting with get_site with site "${site}".`
                 : `Created the Nera site "${site}". Call get_site with site "${site}" to see its pages, then edit them with write_page.`,

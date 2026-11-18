@@ -75,14 +75,30 @@ export function capped(text) {
 }
 
 /**
+ * The environment every child gets: this process's, without colour codes and
+ * with `env` added. Under the bundled runtime the shim folder
+ * (`src/runtime.js`) comes first on the PATH, so the child and everything it
+ * starts find `node`, `npm` and `npx`. Also what `create_site` hands
+ * `createSite`, whose children (`npm pack`, `tar`, `npm install`) the runner
+ * does not start.
+ *
+ * @param {Record<string, string>} [env] added to this process's environment
+ * @param {NodeJS.Platform} [platform] injected in tests
+ * @param {string|null} [shim] the shim folder; the active one by default
+ * @returns {Record<string, string|undefined>}
+ */
+export function childEnv(env = {}, platform = process.platform, shim = activeShim()) {
+    const merged = { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', ...env }
+    return shim ? withPathPrefix(merged, shim, platform) : merged
+}
+
+/**
  * The options every child is spawned with: no shell (arguments are never
  * interpreted), no stdin (nothing can wait for an answer), both output streams
- * piped (none of it reaches this process's stdout), no colour codes, and — on
- * POSIX — its own process group, so `stopChild` reaches the processes it
- * starts in turn (npm's scripts, Vite's workers). Windows has no process
- * groups to signal; `stopChild` ends the tree with `taskkill /T` there.
- * Under the bundled runtime the shim folder (`src/runtime.js`) comes first on
- * the PATH, so the child and everything it starts find `node`, `npm` and `npx`.
+ * piped (none of it reaches this process's stdout), the env of `childEnv`,
+ * and — on POSIX — its own process group, so `stopChild` reaches the
+ * processes it starts in turn (npm's scripts, Vite's workers). Windows has no
+ * process groups to signal; `stopChild` ends the tree with `taskkill /T` there.
  *
  * @param {string} cwd
  * @param {Record<string, string>} [env] added to this process's environment
@@ -91,13 +107,12 @@ export function capped(text) {
  * @returns {import('node:child_process').SpawnOptions}
  */
 export function spawnOptions(cwd, env = {}, platform = process.platform, shim = activeShim()) {
-    const merged = { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', ...env }
     return {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
         detached: platform !== 'win32',
-        env: shim ? withPathPrefix(merged, shim, platform) : merged,
+        env: childEnv(env, platform, shim),
     }
 }
 

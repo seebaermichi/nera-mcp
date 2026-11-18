@@ -4,7 +4,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { spawnOptions } from '../src/runner.js'
+import { childEnv, spawnOptions } from '../src/runner.js'
 import {
     activateShim, activeShim, npmScripts, ownNpm, pathKey, setupRuntime, shimScripts, withPathPrefix, writeShim,
 } from '../src/runtime.js'
@@ -142,13 +142,6 @@ describe('the PATH a child gets', () => {
         expect(withPathPrefix({ Path: 'C:\\a', PATH: 'C:\\z' }, 'C:\\shim', 'win32')).toEqual({ Path: 'C:\\shim;C:\\a' })
     })
 
-    it('does not add the shim folder twice to a PATH that starts with it', () => {
-        expect(withPathPrefix({ PATH: '/shim:/usr/bin' }, '/shim', 'linux')).toEqual({ PATH: '/shim:/usr/bin' })
-        expect(withPathPrefix({ PATH: '/shim' }, '/shim', 'linux')).toEqual({ PATH: '/shim' })
-        expect(withPathPrefix({ PATH: '/usr/bin:/shim' }, '/shim', 'linux')).toEqual({ PATH: '/shim:/usr/bin:/shim' })
-        expect(withPathPrefix({ PATH: 'C:\\shim;C:\\a' }, 'C:\\shim', 'win32')).toEqual({ PATH: 'C:\\shim;C:\\a' })
-    })
-
     it('is untouched without an active shim, and prefixed with one', () => {
         expect(activeShim()).toBeNull()
         expect(spawnOptions(env.site).env.PATH).toBe(process.env.PATH)
@@ -160,10 +153,10 @@ describe('the PATH a child gets', () => {
 })
 
 describe('setupRuntime', () => {
-    it('does nothing without NERA_MCP_RUNTIME=bundled, leaving the PATH as it was', () => {
+    it('does nothing without NERA_MCP_RUNTIME=bundled', () => {
         const unbundled = { NERA_MCP_RUNTIME: 'system', PATH: '/usr/bin' }
         expect(setupRuntime({ env: {} })).toBeNull()
-        expect(setupRuntime({ env: unbundled, platform: 'linux' })).toBeNull()
+        expect(setupRuntime({ env: unbundled })).toBeNull()
         expect(unbundled).toEqual({ NERA_MCP_RUNTIME: 'system', PATH: '/usr/bin' })
         expect(activeShim()).toBeNull()
     })
@@ -176,31 +169,12 @@ describe('setupRuntime', () => {
         expect(existsSync(path.join(shim.dir, process.platform === 'win32' ? 'node.cmd' : 'node'))).toBe(true)
     })
 
-    it('puts the shim folder first on the PATH of the env it is given', () => {
+    it('leaves the env it is given unchanged: children get the shim through childEnv', () => {
         const bundled = { NERA_MCP_RUNTIME: 'bundled', PATH: '/usr/bin:/bin', HOME: '/h' }
-        const shim = setupRuntime({ env: bundled, shim: { npm: null }, platform: 'linux' })
+        const shim = setupRuntime({ env: bundled, shim: { npm: null } })
         shims.push(shim)
 
-        expect(bundled).toEqual({ NERA_MCP_RUNTIME: 'bundled', PATH: `${shim.dir}:/usr/bin:/bin`, HOME: '/h' })
-
-        const empty = { NERA_MCP_RUNTIME: 'bundled' }
-        shims.push(setupRuntime({ env: empty, shim: { npm: null }, platform: 'linux' }))
-        expect(empty.PATH).toBe(activeShim())
-    })
-
-    it('folds every Windows PATH spelling into the one Windows uses', () => {
-        const bundled = { NERA_MCP_RUNTIME: 'bundled', Path: 'C:\\a', PATH: 'C:\\z' }
-        const shim = setupRuntime({ env: bundled, shim: { npm: null }, platform: 'win32' })
-        shims.push(shim)
-
-        expect(bundled).toEqual({ NERA_MCP_RUNTIME: 'bundled', Path: `${shim.dir};C:\\a` })
-    })
-
-    it('gives a child the shim folder once when the server\'s PATH already has it', () => {
-        const bundled = { NERA_MCP_RUNTIME: 'bundled', PATH: '/usr/bin' }
-        const shim = setupRuntime({ env: bundled, shim: { npm: null }, platform: 'linux' })
-        shims.push(shim)
-
-        expect(spawnOptions(env.site, bundled, 'linux').env.PATH).toBe(`${shim.dir}:/usr/bin`)
+        expect(bundled).toEqual({ NERA_MCP_RUNTIME: 'bundled', PATH: '/usr/bin:/bin', HOME: '/h' })
+        expect(childEnv({}, 'linux').PATH).toBe(`${shim.dir}:${process.env.PATH}`)
     })
 })

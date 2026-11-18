@@ -1,10 +1,10 @@
 // The bundled runtime of the Claude Desktop extension: Claude Desktop runs the
 // server on the Node it ships, which comes without npm and puts nothing on the
-// PATH. Every child (`nera new` → `npm install`, `nera dev` → Vite's
-// `#!/usr/bin/env node` scripts, npm's lifecycle scripts) looks `node`, `npm`
-// and `npx` up on the PATH, so under `NERA_MCP_RUNTIME=bundled` the bin writes
-// a shim folder for the three and puts it first on its own PATH and on every
-// child's.
+// PATH. Every child (`createSite`'s `npm pack` and `npm install`, `nera dev`
+// → Vite's `#!/usr/bin/env node` scripts, npm's lifecycle scripts) looks
+// `node`, `npm` and `npx` up on the PATH, so under `NERA_MCP_RUNTIME=bundled`
+// the bin writes a shim folder for the three and every child gets it first on
+// its PATH (`childEnv` in `src/runner.js`).
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
@@ -150,23 +150,9 @@ export function pathKey(env, platform = process.platform) {
 }
 
 /**
- * Deletes every spelling of the PATH variable from `env` (Windows, where the
- * name is case-insensitive).
- *
- * @param {Record<string, string|undefined>} env changed in place
- */
-function dropPathKeys(env) {
-    for (const name of Object.keys(env)) {
-        if (name.toUpperCase() === 'PATH') delete env[name]
-    }
-}
-
-/**
  * A copy of `env` with `dir` first on its PATH. On Windows every spelling of
  * the variable is folded into one, so the child does not get two that
- * disagree. A PATH that already starts with `dir` keeps it once: the server's
- * own PATH carries the shim under the bundled runtime (`setupRuntime`), and a
- * child's env is built from it.
+ * disagree.
  *
  * @param {Record<string, string|undefined>} env
  * @param {string} dir
@@ -176,12 +162,13 @@ function dropPathKeys(env) {
 export function withPathPrefix(env, dir, platform = process.platform) {
     const key = pathKey(env, platform)
     const delimiter = platform === 'win32' ? ';' : ':'
-    const current = env[key]
     const result = { ...env }
-    if (platform === 'win32') dropPathKeys(result)
-    if (!current) result[key] = dir
-    else if (current.split(delimiter)[0] === dir) result[key] = current
-    else result[key] = `${dir}${delimiter}${current}`
+    if (platform === 'win32') {
+        for (const name of Object.keys(result)) {
+            if (name.toUpperCase() === 'PATH') delete result[name]
+        }
+    }
+    result[key] = env[key] ? `${dir}${delimiter}${env[key]}` : dir
     return result
 }
 
@@ -209,24 +196,18 @@ export function activeShim() {
 
 /**
  * What the bin calls at start: under `NERA_MCP_RUNTIME=bundled` it writes the
- * shim folder, activates it for children and puts it first on the PATH of
- * `env` itself — the server's own `process.env` by default — because some
- * Nera code runs in-process and looks `npm` up there (`createSite` downloads a
- * starter with `npm pack` through `execFileSync`). Otherwise it does nothing.
+ * shim folder and activates it; otherwise it does nothing. The env it reads is
+ * never changed: the shim reaches every child through `childEnv`, also the
+ * ones `createSite` starts in-process (it takes that env).
  *
  * @param {object} [options]
- * @param {Record<string, string|undefined>} [options.env] read for the switch and patched in place
+ * @param {Record<string, string|undefined>} [options.env] read for the switch only
  * @param {Parameters<typeof writeShim>[0]} [options.shim] passed to `writeShim` (tests)
- * @param {NodeJS.Platform} [options.platform] injected in tests
  * @returns {ReturnType<typeof writeShim>|null} the shim, whose `remove` the bin calls on exit
  */
-export function setupRuntime({ env = process.env, shim, platform = process.platform } = {}) {
+export function setupRuntime({ env = process.env, shim } = {}) {
     if (env[RUNTIME_ENV] !== BUNDLED) return null
     const written = writeShim(shim)
     activateShim(written.dir)
-    const prefixed = withPathPrefix(env, written.dir, platform)
-    const key = pathKey(env, platform)
-    if (platform === 'win32') dropPathKeys(env)
-    env[key] = prefixed[key]
     return written
 }

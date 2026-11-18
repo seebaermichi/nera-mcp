@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
--   `create_site` writes the site with `createSite()` from `@nera-static/nera` inside the server instead of spawning `nera new`, then runs `npm install` as a cancellable command whose output is captured. Its inputs, checks and result shape are unchanged.
+-   `create_site` creates and installs the site with `createSite()` from `@nera-static/nera` inside the server instead of spawning `nera new`. Cancelling the call stops the install and removes the new folder again; npm's output goes to the server's log (stderr). Its inputs, checks and result shape are unchanged.
 -   `list_starters`, `list_themes`, `list_plugins` and the `nera://catalog/*` resources come from `listCatalog()` of `@nera-static/nera` instead of the server's own registry search. Offline, the starters fall back to the official list the CLI bundles; themes and plugins still report the registry error.
 -   `validate` calls `validate()` from `@nera-static/nera`, so it runs the validator version the CLI pins; its records are unchanged. `@nera-static/validate` is no longer a direct dependency.
--   With `NERA_MCP_RUNTIME=bundled` (the Desktop extension), the shim folder also goes first on the server's own PATH, so a starter download inside `create_site` finds the bundled `npm`.
--   Requires `@nera-static/nera` ^1.24.0 (was ^1.23.0), the first release with this API.
+-   With `NERA_MCP_RUNTIME=bundled` (the Desktop extension), `create_site` hands `createSite` the same environment as every other command, shim folder first on the PATH, so its starter download and `npm install` find the bundled `npm`.
+-   Requires `@nera-static/nera` ^1.25.0 (was ^1.23.0), the first release whose `createSite` installs without blocking and takes `signal` and `env`.
 
 ## [1.1.0] - 2026-11-18
 
