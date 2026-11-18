@@ -101,7 +101,15 @@ async function isDanglingLink(candidate) {
     }
 }
 
-function isInside(base, target) {
+/**
+ * Whether `target` is `base` itself or lies below it. Both must be real,
+ * absolute paths (from `realRoot` / `resolveInRoot`).
+ *
+ * @param {string} base
+ * @param {string} target
+ * @returns {boolean}
+ */
+export function isInside(base, target) {
     const relative = path.relative(base, target)
     return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
 }
