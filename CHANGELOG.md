@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-18
+
+### Added
+
+-   A Claude Desktop extension, `nera-mcp-<version>.mcpb`, attached to every GitHub Release: double-click to install, pick the sites folder in its settings. It runs on the Node that ships with Claude Desktop and brings npm itself, so no Node.js installation is needed. `npm run mcpb` builds it; its manifest is made from `package.json` and lists the tools and prompts the server registers.
+-   `NERA_MCP_RUNTIME=bundled` (set by the extension): every command the server starts finds `node`, `npm` and `npx` through a shim folder first on its PATH, even with no Node on the system PATH. Without the variable nothing changes.
+-   A Claude Code plugin with the Nera skill (copied from `@nera-static/nera`) and the server, and a marketplace in this repository: `claude plugin marketplace add seebaermichi/nera-mcp`, then `claude plugin install nera@nera`. It asks for the sites folder when it is enabled and starts the server at the plugin's own version.
+
 ## [1.0.1] - 2026-11-18
 
 ### Added

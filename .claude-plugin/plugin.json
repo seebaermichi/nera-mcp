@@ -1,6 +1,6 @@
 {
     "name": "nera",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "description": "Create, edit, build, validate, preview and publish websites made with Nera, a static site generator: the Nera skill plus the Nera MCP server, which works only inside the sites folder you pick on enable.",
     "author": {
         "name": "Michael Becker"
@@ -28,7 +28,7 @@
             "command": "npx",
             "args": [
                 "-y",
-                "@nera-static/mcp@1.0.1",
+                "@nera-static/mcp@1.1.0",
                 "--root",
                 "${user_config.root}"
             ]

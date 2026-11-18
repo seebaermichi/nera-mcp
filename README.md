@@ -15,14 +15,43 @@ The client starts this command itself; you only add it to the client's configura
 
 ## Requirements
 
--   Node.js **22.12 or later** (`node --version`), with `npx`
+-   Node.js **22.12 or later** (`node --version`), with `npx`. Not needed for the Claude Desktop extension, which brings its own.
 -   For `publish`: a GitHub account (and a Netlify account if you host there)
 
 ## Install
 
-Replace `/Users/you/Sites` with the folder your sites should live in. It must exist. Use an absolute path: clients do not expand `~` in their configuration files.
+### Claude Desktop extension
 
-### Claude Code
+The easiest way, and no Node.js needed: Claude Desktop runs the server on the Node it ships, and the extension brings npm along.
+
+1. Download `nera-mcp-<version>.mcpb` from the [latest release](https://github.com/seebaermichi/nera-mcp/releases/latest).
+2. Double-click it and choose **Install** in Claude Desktop.
+3. Pick your **Sites folder** when Claude Desktop asks for it: the folder your sites live in.
+
+The extension runs on macOS and Windows. To update, install the `.mcpb` of a newer release.
+
+### Claude Code plugin
+
+The plugin brings the server and the Nera skill, which teaches Claude how a Nera site is built, in one install:
+
+```bash
+claude plugin marketplace add seebaermichi/nera-mcp
+claude plugin install nera@nera
+```
+
+or, inside Claude Code 2.1.275 or later, in one step:
+
+```text
+/plugin install nera --marketplace seebaermichi/nera-mcp
+```
+
+Claude Code asks for your **Sites folder** when the plugin is enabled. The plugin starts the server with `npx`, so it needs Node.js (see Requirements).
+
+### Manual configuration
+
+To add the server to a client yourself, replace `/Users/you/Sites` below with the folder your sites should live in. It must exist. Use an absolute path: clients do not expand `~` in their configuration files.
+
+#### Claude Code
 
 ```bash
 claude mcp add --transport stdio nera -- npx -y @nera-static/mcp --root /Users/you/Sites
@@ -30,9 +59,9 @@ claude mcp add --transport stdio nera -- npx -y @nera-static/mcp --root /Users/y
 
 Add `--scope user` to have it in every project, or `--scope project` to share it through the project's `.mcp.json`.
 
-### Claude Desktop
+#### Claude Desktop
 
-Settings → Developer → **Edit Config** opens `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`). Add the server and restart Claude Desktop:
+Without the extension: Settings → Developer → **Edit Config** opens `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`). Add the server and restart Claude Desktop:
 
 ```json
 {
@@ -45,11 +74,11 @@ Settings → Developer → **Edit Config** opens `claude_desktop_config.json` (m
 }
 ```
 
-### Cursor
+#### Cursor
 
 Add the same `mcpServers` entry to `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project).
 
-### Codex
+#### Codex
 
 ```bash
 codex mcp add nera -- npx -y @nera-static/mcp --root /Users/you/Sites
