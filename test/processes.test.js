@@ -1,9 +1,9 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createProcesses } from '../src/processes.js'
 import { pendingAction, previewUrl } from '../src/tools/long-running.js'
-import { connect, makeRoot, siteFiles, textOf, writeFiles } from './helpers.js'
+import { connect, fakeWindowsSpawn, makeRoot, siteFiles, textOf, writeFiles } from './helpers.js'
 
 /**
  * A fake `nera` for the site's node_modules. It appends its argv and BROWSER
@@ -267,6 +267,28 @@ describe('closing the server', () => {
         expect(await preview.waitFor((r) => r.exited, 5000)).toBe(true)
         expect(await publish.waitFor((r) => r.exited, 5000)).toBe(true)
         expect(await waitUntil(() => !isAlive(grandchild))).toBe(true)
+    })
+})
+
+describe('stopping on Windows', () => {
+    it('stopAll ends each tracked tree with taskkill /T /F, never through a process group', async () => {
+        const { spawn, taskkills } = fakeWindowsSpawn()
+        const windows = createProcesses({ spawn, platform: 'win32', grace: 5000 })
+        const script = ['-e', 'setInterval(() => {}, 1000)']
+        const first = windows.start('a', 'node', script, { cwd: env.site })
+        const second = windows.start('b', 'node', script, { cwd: env.site })
+        const kill = vi.spyOn(process, 'kill')
+
+        await windows.stopAll()
+        kill.mockRestore()
+
+        expect(first.exited && second.exited).toBe(true)
+        expect(taskkills.map(({ args }) => args)).toEqual([
+            ['/pid', String(first.child.pid), '/T', '/F'],
+            ['/pid', String(second.child.pid), '/T', '/F'],
+        ])
+        expect(taskkills.every(({ options }) => options.shell === false && options.stdio === 'ignore')).toBe(true)
+        expect(kill.mock.calls.filter(([target]) => target < 0)).toEqual([])
     })
 })
 

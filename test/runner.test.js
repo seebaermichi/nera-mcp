@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRunner, neraBin, npmCommand } from '../src/runner.js'
-import { makeRoot, writeFiles } from './helpers.js'
+import { fakeWindowsSpawn, makeRoot, writeFiles } from './helpers.js'
 
 let env
 
@@ -99,6 +99,54 @@ describe('createRunner', () => {
 
     it('refuses any other command', async () => {
         await expect(createRunner()('sh', ['-c', 'true'], { cwd: env.site })).rejects.toThrow(/nera, npm or node only/)
+    })
+})
+
+describe('stopping a run on Windows', () => {
+    const LONG = ['-e', 'console.log(process.pid); setTimeout(() => {}, 20000)']
+
+    it('ends the whole tree with taskkill /T /F, without a shell and never through a process group', async () => {
+        const { spawn, taskkills } = fakeWindowsSpawn()
+        const kill = vi.spyOn(process, 'kill')
+        const run = await createRunner({ spawn, platform: 'win32', timeout: 200, grace: 5000 })('node', LONG, { cwd: env.site })
+
+        expect(run).toMatchObject({ code: null, timedOut: true })
+        const pid = String(Number(run.stdout))
+        // once, at the stop; not again after the child exited (its pid may be reused by then)
+        // by its absolute path: a bare name would be looked up in the working directory first
+        const file = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\taskkill.exe`
+        expect(taskkills).toEqual([{ file, args: ['/pid', pid, '/T', '/F'], options: { stdio: 'ignore', shell: false, windowsHide: true } }])
+        expect(kill.mock.calls.filter(([target]) => target < 0)).toEqual([])
+    })
+
+    it('spawns the child without its own process group', async () => {
+        const spawn = vi.fn(() => { throw new Error('stop') })
+        await expect(createRunner({ spawn, platform: 'win32' })('node', [], { cwd: env.site })).rejects.toThrow('stop')
+        expect(spawn.mock.calls[0][2]).toMatchObject({ detached: false, shell: false })
+    })
+
+    it.each(['error', 'throw'])('terminates the child itself when taskkill cannot start (%s), without throwing', async (failure) => {
+        const { spawn, taskkills } = fakeWindowsSpawn({ taskkill: failure })
+        const controller = new AbortController()
+        const pending = createRunner({ spawn, platform: 'win32', grace: 5000 })('node', LONG, { cwd: env.site, signal: controller.signal })
+        setTimeout(() => controller.abort(), 200)
+        const started = Date.now()
+        const run = await pending
+
+        expect(run).toMatchObject({ code: null, cancelled: true })
+        expect(Date.now() - started).toBeLessThan(4000)
+        expect(taskkills).toHaveLength(1)
+        expect(await gone(Number(run.stdout))).toBe(true)
+    })
+
+    it('leaves POSIX alone: no taskkill, the process group is signalled', async () => {
+        const { spawn, taskkills } = fakeWindowsSpawn()
+        const kill = vi.spyOn(process, 'kill')
+        const run = await createRunner({ spawn, platform: 'linux', timeout: 200 })('node', LONG, { cwd: env.site })
+
+        expect(run).toMatchObject({ code: null, timedOut: true })
+        expect(taskkills).toEqual([])
+        expect(kill).toHaveBeenCalledWith(-Number(run.stdout), 'SIGTERM')
     })
 })
 

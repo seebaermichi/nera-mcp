@@ -1,3 +1,5 @@
+import { spawn as nodeSpawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -90,4 +92,38 @@ export async function connect(root, options = {}) {
 /** The text of a tool result (its first content item). */
 export function textOf(result) {
     return result.content?.[0]?.text ?? ''
+}
+
+/**
+ * A `spawn` for tests that fake Windows: `taskkill` is recorded instead of
+ * run, and ends the target with SIGKILL as the real one would (the target is
+ * a POSIX child here, so its own children are not reached); everything else
+ * is spawned for real. `taskkill: 'error'` makes it fail to start (an `error`
+ * event), `'throw'` makes `spawn` itself throw.
+ *
+ * @param {{ taskkill?: 'kill'|'error'|'throw' }} [options]
+ * @returns {{ spawn: typeof nodeSpawn, taskkills: Array<{ file: string, args: string[], options: object }> }}
+ */
+export function fakeWindowsSpawn({ taskkill = 'kill' } = {}) {
+    const taskkills = []
+    const spawn = (file, args, options) => {
+        if (!/taskkill(\.exe)?$/i.test(file)) return nodeSpawn(file, args, options)
+        taskkills.push({ file, args, options })
+        if (taskkill === 'throw') throw new Error('spawn taskkill ENOENT')
+        const fake = new EventEmitter()
+        setImmediate(() => {
+            if (taskkill === 'error') {
+                fake.emit('error', new Error('spawn taskkill ENOENT'))
+                return
+            }
+            try {
+                process.kill(Number(args[1]), 'SIGKILL')
+            } catch {
+                // gone already: the real taskkill exits non-zero then
+            }
+            fake.emit('exit', 0)
+        })
+        return fake
+    }
+    return { spawn, taskkills }
 }

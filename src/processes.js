@@ -39,17 +39,19 @@ export function freePort() {
 
 /**
  * The registry of long-running children, one per key. A child is started
- * like a runner's (`spawnOptions`: no shell, no stdin, output captured, its
- * own process group) and stays in the registry after it exits, so a later
- * tool call can still read how it ended, until it is `forget`-ten.
+ * like a runner's (`spawnOptions`: no shell, no stdin, output captured;
+ * `stopChild` ends what it started too) and stays in the registry after it
+ * exits, so a later tool call can still read how it ended, until it is
+ * `forget`-ten.
  * `stopAll` stops every child that is still running — the server calls it
  * when it closes.
  *
  * @param {object} [options]
  * @param {typeof nodeSpawn} [options.spawn] injected in tests
  * @param {number} [options.grace] milliseconds between SIGTERM and SIGKILL
+ * @param {NodeJS.Platform} [options.platform] injected in tests
  */
-export function createProcesses({ spawn = nodeSpawn, grace = KILL_GRACE_MS } = {}) {
+export function createProcesses({ spawn = nodeSpawn, grace = KILL_GRACE_MS, platform = process.platform } = {}) {
     /** @type {Map<string, Tracked & { child: import('node:child_process').ChildProcess }>} */
     const tracked = new Map()
 
@@ -68,7 +70,7 @@ export function createProcesses({ spawn = nodeSpawn, grace = KILL_GRACE_MS } = {
             throw new Error(`"${key}" is already running.`)
         }
         const { file, prefix } = commandFor(command, cwd)
-        const child = spawn(file, [...prefix, ...args], spawnOptions(cwd, env))
+        const child = spawn(file, [...prefix, ...args], spawnOptions(cwd, env, platform))
         const changes = new EventEmitter()
         const entry = {
             key,
@@ -129,7 +131,7 @@ export function createProcesses({ spawn = nodeSpawn, grace = KILL_GRACE_MS } = {
         const entry = tracked.get(key)
         if (!entry) return false
         tracked.delete(key)
-        await stopChild(entry.child, { grace })
+        await stopChild(entry.child, { grace, platform, spawn })
         // its output streams close just after it exits (at once, since its group is gone)
         await entry.waitFor((r) => r.exited, grace)
         return true
