@@ -1,0 +1,119 @@
+# @nera-static/mcp
+
+[![Test](https://github.com/seebaermichi/nera-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/seebaermichi/nera-mcp/actions/workflows/test.yml)
+[![npm version](https://img.shields.io/npm/v/@nera-static/mcp)](https://www.npmjs.com/package/@nera-static/mcp)
+
+A local [MCP](https://modelcontextprotocol.io) server for the [Nera](https://github.com/seebaermichi/nera) static site generator. It lets an AI assistant (Claude Code, Claude Desktop, Cursor, Codex or any other MCP client) create, edit, build, validate, preview and publish Nera sites in one folder on your computer, and nowhere else.
+
+📖 **Documentation:** [nera.js.org](https://nera.js.org)
+
+```bash
+npx -y @nera-static/mcp --root ~/Sites
+```
+
+The client starts this command itself; you only add it to the client's configuration (below). `--root` is the folder the server may work in: every site it creates lands there, and every path a tool takes is checked against it (no `..`, no absolute path outside it, no symlink leading out).
+
+## Requirements
+
+-   Node.js **22.12 or later** (`node --version`), with `npx`
+-   For `publish`: a GitHub account (and a Netlify account if you host there)
+
+## Install
+
+Replace `/Users/you/Sites` with the folder your sites should live in. It must exist. Use an absolute path: clients do not expand `~` in their configuration files.
+
+### Claude Code
+
+```bash
+claude mcp add --transport stdio nera -- npx -y @nera-static/mcp --root /Users/you/Sites
+```
+
+Add `--scope user` to have it in every project, or `--scope project` to share it through the project's `.mcp.json`.
+
+### Claude Desktop
+
+Settings → Developer → **Edit Config** opens `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`). Add the server and restart Claude Desktop:
+
+```json
+{
+    "mcpServers": {
+        "nera": {
+            "command": "npx",
+            "args": ["-y", "@nera-static/mcp", "--root", "/Users/you/Sites"]
+        }
+    }
+}
+```
+
+### Cursor
+
+Add the same `mcpServers` entry to `~/.cursor/mcp.json` (all projects) or `.cursor/mcp.json` (one project).
+
+### Codex
+
+```bash
+codex mcp add nera -- npx -y @nera-static/mcp --root /Users/you/Sites
+```
+
+or in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.nera]
+command = "npx"
+args = ["-y", "@nera-static/mcp", "--root", "/Users/you/Sites"]
+```
+
+## What the assistant gets
+
+A **site** is a folder under the root (or the root itself) whose `package.json` depends on `@nera-static/nera`. Tools that work on a site take `site`, its path relative to the root (`.` for the root itself); file tools take a path relative to the site.
+
+### Tools
+
+| Tool | Does |
+| --- | --- |
+| `list_starters`, `list_themes`, `list_plugins` | The starter kits, themes and plugins on npm, official ones first |
+| `create_site` | Creates a site with `nera new` (`name`, optional `starter`, `theme`, `title`, `lang`) |
+| `list_sites` | The Nera sites under the root |
+| `get_site` | A site's configuration, pages, plugins and theme |
+| `read_page`, `write_page`, `delete_page` | A Markdown page with its frontmatter; `write_page` refuses frontmatter without `layout` |
+| `read_file`, `write_file` | Configuration, templates and assets inside a site |
+| `add_plugin` | Installs an `@nera-static/plugin-*`, copies its default config and publishes its templates |
+| `build` | `nera build`, optionally with the output checks (`check: true`) |
+| `validate` | `nera validate`: the site's layouts, includes and YAML, as `{ file, line, severity, rule, message }` records |
+| `preview` | Starts `nera dev` and returns the local address; `stop: true` stops it |
+| `publish` | `nera publish` to GitHub Pages or Netlify; returns the sign-in code for you, then the live address |
+
+The commands run through the site's own `@nera-static/nera` when it has one installed, so the assistant gets the same results as you do in a terminal. A preview or a publish keeps running between calls and stops when the client closes the server.
+
+### Resources
+
+| URI | Holds |
+| --- | --- |
+| `nera://docs/llms-full.txt` | The complete Nera documentation, bundled with this release |
+| `nera://catalog/starters`, `nera://catalog/themes`, `nera://catalog/plugins` | The catalogs as JSON |
+| `nera://site/{site}/AGENTS.md` | A site's `AGENTS.md` (`nera://site/AGENTS.md` for a site in the root itself) |
+
+### Prompts
+
+| Prompt | Walks through |
+| --- | --- |
+| `new_business_website` | A new business website from the business starter |
+| `new_blog` | A new blog from the blog starter |
+| `add_page` | Adding a page or a post to a site |
+| `put_site_online` | Building, checking and publishing a site |
+
+## Privacy and safety
+
+-   The server only touches files below `--root`. A path outside it is refused with an error, never quietly corrected.
+-   It never asks for input and never prompts in a terminal; long-running commands run in the background and are stopped when the server exits.
+-   `publish` signs in through GitHub's device flow: you enter the code in your browser. Tokens stay where `nera publish` keeps them (the system keychain, or a file only you can read) and are never returned to the assistant or written into a site.
+-   The catalogs are read from the public npm registry. Nothing else leaves your computer unless you publish.
+
+## Compatibility
+
+-   Node.js 22.12 or later
+-   Brings `@nera-static/nera` 1.23.0 for sites that have none installed. A site with its own CLI installed runs that one: `build` needs 1.9.0 or later (`--json`), `publish` 1.19.0 (1.20.0 for Netlify). `npm update` in the site brings it up to date.
+
+## License
+
+MIT
