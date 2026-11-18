@@ -1,0 +1,33 @@
+{
+    "manifest_version": "0.3",
+    "name": "nera-mcp",
+    "display_name": "Nera",
+    "long_description": "Lets Claude create, edit, build, validate, preview and publish websites made with Nera, a static site generator: Markdown pages and Pug layouts, built into plain HTML. Pick the folder your sites live in; Claude works inside it and nowhere else. Node and npm come with the extension, so nothing else needs to be installed.",
+    "documentation": "https://nera.js.org",
+    "icon": "icon.png",
+    "server": {
+        "type": "node",
+        "entry_point": "bin/nera-mcp.js",
+        "mcp_config": {
+            "command": "node",
+            "args": ["${__dirname}/bin/nera-mcp.js", "--root", "${user_config.root}"],
+            "env": {
+                "NERA_MCP_RUNTIME": "bundled"
+            }
+        }
+    },
+    "user_config": {
+        "root": {
+            "type": "directory",
+            "title": "Sites folder",
+            "description": "The folder your Nera sites live in. Claude creates new sites in it and may read and change files only inside it.",
+            "required": true
+        }
+    },
+    "compatibility": {
+        "platforms": ["darwin", "win32"],
+        "runtimes": {
+            "node": ">=22.12.0"
+        }
+    }
+}

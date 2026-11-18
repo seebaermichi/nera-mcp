@@ -12,7 +12,8 @@
     "scripts": {
         "lint": "eslint .",
         "test": "vitest",
-        "prepack": "node scripts/fetch-docs.js"
+        "prepack": "node scripts/fetch-docs.js",
+        "mcpb": "node scripts/fetch-docs.js && node scripts/build-mcpb.js"
     },
     "keywords": [
         "nera",
@@ -47,6 +48,7 @@
         "zod": "^4.6.7"
     },
     "devDependencies": {
+        "@anthropic-ai/mcpb": "^2.1.2",
         "eslint": "^10.15.0",
         "vitest": "^5.1.1"
     },

@@ -15,12 +15,18 @@ on:
             - 'v*'
 
 permissions:
-    id-token: write # required for OIDC — without it, publish falls back to a token and fails
     contents: read
+
+# Each job gets only what it needs: `publish` the OIDC token for npm, `release`
+# the `contents: write` that creates the GitHub Release.
 
 jobs:
     publish:
         runs-on: ubuntu-latest
+
+        permissions:
+            id-token: write # required for OIDC — without it, publish falls back to a token and fails
+            contents: read
 
         steps:
             - name: Checkout repository
@@ -62,3 +68,37 @@ jobs:
 
             - name: Publish
               run: npm publish
+
+    # The Claude Desktop extension, attached to the tag's GitHub Release once
+    # the package is on npm (a failed bundle never holds back the package).
+    release:
+        needs: publish
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: write
+
+        steps:
+            # no token left in .git/config for the install scripts to find
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v7
+              with:
+                  node-version: '24'
+
+            - name: Install dependencies
+              run: npm ci
+
+            # downloads the docs, installs the production dependencies for
+            # every Desktop platform plus npm itself, packs nera-mcp-<version>.mcpb
+            - name: Build the Claude Desktop extension
+              run: npm run mcpb
+
+            - name: Attach the extension to the GitHub Release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: gh release create "$GITHUB_REF_NAME" "nera-mcp-${GITHUB_REF_NAME#v}.mcpb" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
