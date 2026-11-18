@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRunner, neraBin, npmCommand } from '../src/runner.js'
+import { activateShim } from '../src/runtime.js'
 import { fakeWindowsSpawn, makeRoot, writeFiles } from './helpers.js'
 
 let env
@@ -12,6 +13,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
     vi.restoreAllMocks()
+    activateShim(null)
     await env.cleanup()
 })
 
@@ -97,6 +99,16 @@ describe('createRunner', () => {
         expect(options).toMatchObject({ cwd: env.site, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
     })
 
+    it('puts the active shim folder first on the child\'s PATH, and leaves the PATH alone without one', async () => {
+        const printPath = ['-e', 'console.log(process.env.PATH)']
+        const plain = await createRunner()('node', printPath, { cwd: env.site })
+        expect(plain.stdout).toBe(`${process.env.PATH}\n`)
+
+        activateShim(path.join(env.tmp, 'shim'))
+        const shimmed = await createRunner()('node', printPath, { cwd: env.site })
+        expect(shimmed.stdout).toBe(`${path.join(env.tmp, 'shim')}${path.delimiter}${process.env.PATH}\n`)
+    })
+
     it('refuses any other command', async () => {
         await expect(createRunner()('sh', ['-c', 'true'], { cwd: env.site })).rejects.toThrow(/nera, npm or node only/)
     })
@@ -177,8 +189,16 @@ describe('neraBin', () => {
 describe('npmCommand', () => {
     it('uses npm-cli.js next to the Node binary when it is there', async () => {
         const node = path.join(env.tmp, 'node', 'bin', 'node')
-        expect(npmCommand(node)).toEqual({ file: 'npm', prefix: [] })
+        expect(npmCommand(node, null)).toEqual({ file: 'npm', prefix: [] })
         await writeFiles(path.join(env.tmp, 'node'), { 'lib/node_modules/npm/bin/npm-cli.js': '' })
-        expect(npmCommand(node)).toEqual({ file: node, prefix: [path.join(env.tmp, 'node', 'bin', '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')] })
+        expect(npmCommand(node, null)).toEqual({ file: node, prefix: [path.join(env.tmp, 'node', 'bin', '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')] })
+    })
+
+    it('prefers the npm in the server\'s own node_modules (the Desktop extension bundles one)', async () => {
+        const node = path.join(env.tmp, 'node', 'bin', 'node')
+        await writeFiles(path.join(env.tmp, 'node'), { 'lib/node_modules/npm/bin/npm-cli.js': '' })
+        const own = path.join(env.tmp, 'ext', 'node_modules', 'npm')
+        await writeFiles(own, { 'bin/npm-cli.js': '' })
+        expect(npmCommand(node, own)).toEqual({ file: node, prefix: [path.join(own, 'bin', 'npm-cli.js')] })
     })
 })

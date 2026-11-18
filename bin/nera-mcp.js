@@ -64,12 +64,22 @@ if (!options.root) {
 }
 
 // the server and the Nera packages it loads come last: only the server needs them
-const [{ StdioServerTransport }, { createServer }, { createProcesses }, { PathError }] = await Promise.all([
+const [{ StdioServerTransport }, { createServer }, { createProcesses }, { PathError }, { setupRuntime }] = await Promise.all([
     import('@modelcontextprotocol/sdk/server/stdio.js'),
     import('../src/server.js'),
     import('../src/processes.js'),
     import('../src/paths.js'),
+    import('../src/runtime.js'),
 ])
+
+// the Desktop extension sets NERA_MCP_RUNTIME=bundled: its Node has no npm and
+// nothing on the PATH, so children get a shim folder for node, npm and npx;
+// the folder goes when this process exits, however it exits
+const runtime = setupRuntime()
+if (runtime) {
+    process.on('exit', runtime.remove)
+    console.error(`nera-mcp: bundled runtime, node${runtime.npm ? ', npm and npx' : ' (no npm found)'} for children in ${runtime.dir}`)
+}
 
 const processes = createProcesses()
 let server

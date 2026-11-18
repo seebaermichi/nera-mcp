@@ -2,6 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { activeShim, npmScripts, ownNpm, withPathPrefix } from './runtime.js'
 
 const require = createRequire(import.meta.url)
 const NERA_BIN = path.join('node_modules', '@nera-static', 'nera', 'bin', 'nera.js')
@@ -27,22 +28,19 @@ export function neraBin(cwd) {
 }
 
 /**
- * How to start npm without a shell: its `npm-cli.js` next to the running Node
- * (where every Node installer puts it), else the `npm` executable on the PATH.
- * Running the script through `process.execPath` avoids `npm.cmd` on Windows,
- * which Node refuses to spawn without a shell.
+ * How to start npm without a shell: its `npm-cli.js` from the server's own
+ * `node_modules/npm` (the Desktop extension bundles one) or next to the running
+ * Node (where every Node installer puts it), else the `npm` executable on the
+ * PATH. Running the script through `process.execPath` avoids `npm.cmd` on
+ * Windows, which Node refuses to spawn without a shell.
  *
  * @param {string} [execPath] the Node binary
+ * @param {string|null} [own] the server's own npm package folder
  * @returns {{ file: string, prefix: string[] }}
  */
-export function npmCommand(execPath = process.execPath) {
-    const bin = path.dirname(execPath)
-    const candidates = [
-        path.join(bin, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-        path.join(bin, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
-    ]
-    const script = candidates.find((candidate) => existsSync(candidate))
-    return script ? { file: execPath, prefix: [script] } : { file: 'npm', prefix: [] }
+export function npmCommand(execPath = process.execPath, own = ownNpm()) {
+    const scripts = npmScripts(execPath, own)
+    return scripts ? { file: execPath, prefix: [scripts.npmCli] } : { file: 'npm', prefix: [] }
 }
 
 /**
@@ -83,19 +81,23 @@ export function capped(text) {
  * POSIX — its own process group, so `stopChild` reaches the processes it
  * starts in turn (npm's scripts, Vite's workers). Windows has no process
  * groups to signal; `stopChild` ends the tree with `taskkill /T` there.
+ * Under the bundled runtime the shim folder (`src/runtime.js`) comes first on
+ * the PATH, so the child and everything it starts find `node`, `npm` and `npx`.
  *
  * @param {string} cwd
  * @param {Record<string, string>} [env] added to this process's environment
  * @param {NodeJS.Platform} [platform] injected in tests
+ * @param {string|null} [shim] the shim folder; the active one by default
  * @returns {import('node:child_process').SpawnOptions}
  */
-export function spawnOptions(cwd, env = {}, platform = process.platform) {
+export function spawnOptions(cwd, env = {}, platform = process.platform, shim = activeShim()) {
+    const merged = { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', ...env }
     return {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: false,
         detached: platform !== 'win32',
-        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', ...env },
+        env: shim ? withPathPrefix(merged, shim, platform) : merged,
     }
 }
 

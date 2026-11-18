@@ -19,10 +19,11 @@ const TOOLS = [
 /**
  * Starts the bin with `args` and collects what it writes. `request` sends one
  * JSON-RPC message and resolves with the response carrying its id; `exited`
- * resolves with the exit code once the process ends.
+ * resolves with the exit code once the process ends. `env` is added to this
+ * process's environment.
  */
-function startBin(args) {
-    const child = spawn(process.execPath, [BIN, ...args], { stdio: ['pipe', 'pipe', 'pipe'] })
+function startBin(args, env = {}) {
+    const child = spawn(process.execPath, [BIN, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } })
     const out = { stdout: '', stderr: '' }
     const waiting = new Map()
     child.stdout.setEncoding('utf8')
@@ -103,6 +104,30 @@ describe('bin/nera-mcp.js over stdio', () => {
         expect(list.result.tools.map((t) => t.name).sort()).toEqual(TOOLS)
         expect(jsonRpcLines(bin.out.stdout).map((m) => m.id)).toEqual([1, 2])
         expect(bin.out.stderr).toContain(`nera-mcp ${pkg.version}: serving Nera sites under ${tmp.root}`)
+    }, EXIT_MS)
+
+    it('writes the shim folder under NERA_MCP_RUNTIME=bundled and removes it on exit', async () => {
+        bin = startBin(['--root', tmp.root], { NERA_MCP_RUNTIME: 'bundled' })
+        await initialize(bin)
+        const dir = bin.out.stderr.match(/for children in (.+)\n/)?.[1]
+        expect(dir).toBeTruthy()
+        expect(dir.startsWith(tmp.root)).toBe(false)
+        await expect(fs.access(dir)).resolves.toBeUndefined()
+
+        bin.child.stdin.end()
+
+        expect(await bin.exited).toBe(0)
+        await expect(fs.access(dir)).rejects.toThrow()
+        expect(jsonRpcLines(bin.out.stdout).map((m) => m.id)).toEqual([1])
+    }, EXIT_MS)
+
+    it('writes no shim folder without NERA_MCP_RUNTIME', async () => {
+        bin = startBin(['--root', tmp.root], { NERA_MCP_RUNTIME: '' })
+        await initialize(bin)
+        bin.child.stdin.end()
+
+        expect(await bin.exited).toBe(0)
+        expect(bin.out.stderr).not.toContain('bundled runtime')
     }, EXIT_MS)
 
     it('exits 0 on SIGTERM', async () => {
