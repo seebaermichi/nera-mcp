@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createRunner, neraBin, npmCommand } from '../src/runner.js'
+import { createRequire } from 'node:module'
+import { createRunner, neraBin, neraVersion, npmCommand } from '../src/runner.js'
 import { activateShim } from '../src/runtime.js'
 import { fakeWindowsSpawn, makeRoot, writeFiles } from './helpers.js'
 
@@ -183,6 +184,27 @@ describe('neraBin', () => {
         await installFakeNera(env.site)
         expect(neraBin(env.site)).toBe(path.join(env.site, 'node_modules', '@nera-static', 'nera', 'bin', 'nera.js'))
         await expect(fs.access(neraBin(env.root))).resolves.toBeUndefined()
+    })
+})
+
+describe('neraVersion', () => {
+    it('reads the version of the site\'s own CLI and falls back to the one this server depends on', async () => {
+        const own = createRequire(import.meta.url)('@nera-static/nera/package.json').version
+        expect(neraVersion(env.site)).toBe(own)
+        await writeFiles(env.site, {
+            'node_modules/@nera-static/nera/package.json': '{"name":"@nera-static/nera","version":"1.26.0"}',
+            'node_modules/@nera-static/nera/bin/nera.js': '',
+        })
+        expect(neraVersion(env.site)).toBe('1.26.0')
+    })
+
+    it('is null for a site CLI whose package.json is missing, broken or has no string version', async () => {
+        await writeFiles(env.site, { 'node_modules/@nera-static/nera/bin/nera.js': '' })
+        expect(neraVersion(env.site)).toBeNull()
+        for (const manifest of ['{', '{"name":"@nera-static/nera"}', '{"version":127}', 'null']) {
+            await writeFiles(env.site, { 'node_modules/@nera-static/nera/package.json': manifest })
+            expect(neraVersion(env.site), manifest).toBeNull()
+        }
     })
 })
 

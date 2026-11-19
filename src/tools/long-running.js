@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { freePort } from '../processes.js'
 import { ok, tool, ToolError } from '../results.js'
+import { neraVersion } from '../runner.js'
 import { failureText } from './cli.js'
 import { resolveSite, siteInput } from './sites.js'
 
@@ -12,6 +13,8 @@ export const PUBLISH_WAIT_MS = 30 * 1000
 const PUBLISH_TARGETS = ['github-pages', 'netlify']
 /** How much of the CLI's last progress line a status carries. */
 const PROGRESS_MAX = 300
+/** The first `@nera-static/nera` whose `publish --json` writes the event lines `pendingAction` reads. */
+const PUBLISH_CLI_FLOOR = '1.27.0'
 
 /** Terminal colour codes (ESC [ … m), in case a child ignores NO_COLOR. Built from a string so the source holds no control character. */
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, 'g')
@@ -105,6 +108,31 @@ export function pendingAction(stderr) {
 function lastProgress(stderr) {
     const last = lines(stderr).findLast((line) => eventOf(line) === null) ?? ''
     return last.length > PROGRESS_MAX ? `${last.slice(0, PROGRESS_MAX)}…` : last
+}
+
+/** `x.y.z` with an optional `-prerelease` (and `+build`, ignored), or null. */
+function parseVersion(version) {
+    const match = typeof version === 'string' && version.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/)
+    return match ? { numbers: match.slice(1, 4).map(Number), prerelease: match[4] !== undefined } : null
+}
+
+/**
+ * Whether `version` is `floor` or later, by semver precedence: major, minor
+ * and patch compared as numbers, and a prerelease of a version (`1.27.0-beta.1`)
+ * below that version. Anything that is no `x.y.z` version is not.
+ *
+ * @param {string|null} version
+ * @param {string} floor an `x.y.z` version without a prerelease
+ * @returns {boolean}
+ */
+export function meetsFloor(version, floor) {
+    const have = parseVersion(version)
+    if (!have) return false
+    const need = parseVersion(floor).numbers
+    for (let i = 0; i < 3; i++) {
+        if (have.numbers[i] !== need[i]) return have.numbers[i] > need[i]
+    }
+    return !have.prerelease
 }
 
 /**
@@ -235,6 +263,12 @@ export function registerLongRunningTools(server, ctx) {
         const key = `publish:${resolved.dir}`
         let run = ctx.processes.get(key)
         if (!run) {
+            // an older CLI announces no browser step as an event, so the user would never see the sign-in code
+            const version = neraVersion(resolved.dir)
+            if (!meetsFloor(version, PUBLISH_CLI_FLOOR)) {
+                const runs = version ? `@nera-static/nera ${version}` : 'a @nera-static/nera whose version cannot be read'
+                throw new ToolError(`Publishing "${resolved.site}" runs ${runs}; publish needs ${PUBLISH_CLI_FLOOR} or later. Run \`npm update\` in the site, then call publish again.`)
+            }
             run = ctx.processes.start(key, 'nera', publishArgs(options), { cwd: resolved.dir })
         }
         const before = pendingAction(run.stderr)

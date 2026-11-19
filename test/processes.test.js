@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createProcesses } from '../src/processes.js'
-import { pendingAction, previewUrl } from '../src/tools/long-running.js'
+import { meetsFloor, pendingAction, previewUrl } from '../src/tools/long-running.js'
 import { connect, fakeWindowsSpawn, makeRoot, siteFiles, textOf, writeFiles } from './helpers.js'
 
 /**
@@ -105,7 +105,7 @@ beforeEach(async () => {
     env = await makeRoot()
     // a CommonJS script: the site package is `type: module`, its node_modules copy is not
     await writeFiles(env.site, {
-        'node_modules/@nera-static/nera/package.json': '{"name":"@nera-static/nera"}',
+        'node_modules/@nera-static/nera/package.json': '{"name":"@nera-static/nera","version":"1.27.0"}',
         'node_modules/@nera-static/nera/bin/nera.js': FAKE_NERA,
     })
     processes = createProcesses({ grace: 200 })
@@ -258,6 +258,56 @@ describe('publish', () => {
         const result = await mcp.call('publish', { site: 'site' })
         expect(result.structuredContent).toEqual({ site: 'site', state: 'running', progress: 'Creating the public repository site on GitHub…' })
         expect(run.exited).toBe(false)
+    })
+})
+
+describe('publish on a site whose CLI is too old', () => {
+    it.each([
+        ['1.26.0', '{"name":"@nera-static/nera","version":"1.26.0"}', 'runs @nera-static/nera 1.26.0;'],
+        ['no version', '{"name":"@nera-static/nera"}', 'runs a @nera-static/nera whose version cannot be read;'],
+    ])('refuses a site on %s before starting anything', async (_, manifest, runs) => {
+        await writeFiles(env.site, { 'node_modules/@nera-static/nera/package.json': manifest })
+        await configure({ publish: 'sign-in' })
+        const result = await mcp.call('publish', { site: 'site' })
+
+        expect(result.isError).toBe(true)
+        expect(textOf(result)).toBe(`Publishing "site" ${runs} publish needs 1.27.0 or later. Run \`npm update\` in the site, then call publish again.`)
+        expect(processes.get(`publish:${env.site}`)).toBeUndefined()
+        expect(await callsLog()).toEqual([])
+    })
+
+    it('still reports a run that is already going, and leaves preview alone', async () => {
+        await configure({ publish: 'slow', dev: 'serve' })
+        await mcp.call('publish', { site: 'site' })
+        await writeFiles(env.site, { 'node_modules/@nera-static/nera/package.json': '{"name":"@nera-static/nera","version":"1.26.0"}' })
+
+        const result = await mcp.call('publish', { site: 'site' })
+        expect(result.isError).toBeFalsy()
+        expect(result.structuredContent.state).toBe('running')
+        expect((await mcp.call('preview', { site: 'site' })).isError).toBeFalsy()
+        expect((await callsLog()).map(({ command }) => command)).toEqual(['publish', 'dev'])
+    })
+})
+
+describe('meetsFloor', () => {
+    it.each([
+        ['1.27.0', true],
+        ['1.27.1', true],
+        ['1.28.0', true],
+        ['2.0.0', true],
+        ['1.100.0', true],
+        ['1.27.0+build.5', true],
+        ['1.27.1-beta.1', true],
+        ['1.26.9', false],
+        ['1.9.0', false],
+        ['0.30.0', false],
+        ['1.27.0-beta.1', false],
+        ['1.27', false],
+        ['v1.27.0', false],
+        ['', false],
+        [null, false],
+    ])('%s against 1.27.0 → %s', (version, expected) => {
+        expect(meetsFloor(version, '1.27.0')).toBe(expected)
     })
 })
 

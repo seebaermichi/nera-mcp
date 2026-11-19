@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { activeShim, npmScripts, ownNpm, withPathPrefix } from './runtime.js'
@@ -25,6 +25,23 @@ export function neraBin(cwd) {
     const local = path.join(cwd, NERA_BIN)
     if (existsSync(local)) return local
     return path.join(path.dirname(require.resolve('@nera-static/nera/package.json')), 'bin', 'nera.js')
+}
+
+/**
+ * The version of the `@nera-static/nera` whose script `neraBin(cwd)` names:
+ * the `version` of the `package.json` two folders above it. Read synchronously,
+ * so a caller can check it and start a run without yielding in between.
+ *
+ * @param {string} cwd
+ * @returns {string|null} null when the file cannot be read or carries no string `version`
+ */
+export function neraVersion(cwd) {
+    try {
+        const { version } = JSON.parse(readFileSync(path.join(path.dirname(neraBin(cwd)), '..', 'package.json'), 'utf8'))
+        return typeof version === 'string' ? version : null
+    } catch {
+        return null
+    }
 }
 
 /**
