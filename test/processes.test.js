@@ -11,9 +11,11 @@ import { connect, fakeWindowsSpawn, makeRoot, siteFiles, textOf, writeFiles } fr
  * - `dev`: `{ dev: 'serve' }` prints Vite's Local line after 50 ms and stays up;
  *   `'crash'` fails at once; `'silent'` stays up without printing an address.
  *   `{ grandchild: true }` also starts a child that ignores SIGTERM and writes its pid.
- * - `publish`: `{ publish: 'sign-in' }` asks for the GitHub code, waits for an
- *   `authorized` file, then prints the JSON result; `'fail'` prints a failure
- *   object; `'crash'` dies without one; `'slow'` logs progress and waits.
+ * - `publish`: `{ publish: 'sign-in' }` asks for the GitHub code (the log line
+ *   and the `action_required` event line of `--json`), waits for an
+ *   `authorized` file, then reports `action_done` and prints the JSON result;
+ *   `'fail'` prints a failure object; `'crash'` dies without one; `'slow'` logs
+ *   progress, then an event line, and waits.
  */
 const FAKE_NERA = `
 const fs = require('node:fs')
@@ -47,15 +49,18 @@ if (command === 'publish') {
     }
     if (config.publish === 'slow') {
         console.error('Creating the public repository site on GitHub…')
+        console.error(JSON.stringify({ event: 'action_done', kind: 'github_app_install' }))
         stayUp()
     }
     if (config.publish === 'sign-in') {
         console.error('To sign in to GitHub, enter the code WDJB-MJHT at https://github.com/login/device')
+        console.error(JSON.stringify({ event: 'action_required', action: { kind: 'github_sign_in', code: 'WDJB-MJHT', url: 'https://github.com/login/device' } }))
         console.error('Waiting for you to authorize Nera Static on GitHub…')
         const poll = setInterval(() => {
             if (!fs.existsSync('authorized')) return
             clearInterval(poll)
             console.error('Signed in as octo')
+            console.error(JSON.stringify({ event: 'action_done', kind: 'github_sign_in' }))
             console.log(JSON.stringify({ ok: true, url: 'https://octo.github.io/site/', repository: 'octo/site', sha: 'abc123', run: 'https://github.com/octo/site/actions/runs/1' }))
         }, 20)
     }
@@ -244,11 +249,15 @@ describe('publish', () => {
         expect(textOf(result)).toMatch(/^Publishing "site" stopped without a result: .*❌ Cannot find module keyring$/s)
     })
 
-    it('says it is still running, with the last progress line, when nothing needs the user', async () => {
+    it('says it is still running, with the last progress line and not an event line, when nothing needs the user', async () => {
         await configure({ publish: 'slow' })
+        await mcp.call('publish', { site: 'site' })
+        const run = processes.get(`publish:${env.site}`)
+        expect(await waitUntil(() => run.stderr.includes('"action_done"'))).toBe(true)
+
         const result = await mcp.call('publish', { site: 'site' })
         expect(result.structuredContent).toEqual({ site: 'site', state: 'running', progress: 'Creating the public repository site on GitHub…' })
-        expect(processes.get(`publish:${env.site}`).exited).toBe(false)
+        expect(run.exited).toBe(false)
     })
 })
 
@@ -308,21 +317,59 @@ describe('the root guard on preview and publish', () => {
 })
 
 describe('pendingAction', () => {
-    it('reads the last browser step until the CLI reports it done', () => {
-        const signIn = 'To sign in to GitHub, enter the code ABCD-1234 at https://github.com/login/device\n'
+    const required = (action) => `${JSON.stringify({ event: 'action_required', action })}\n`
+    const done = (kind) => `${JSON.stringify({ event: 'action_done', kind })}\n`
+    const signIn = { kind: 'github_sign_in', code: 'ABCD-1234', url: 'https://github.com/login/device' }
+    const install = { kind: 'github_app_install', url: 'https://github.com/apps/nera-static/installations/new' }
+    const netlify = { kind: 'netlify_sign_in', url: 'https://app.netlify.com/authorize?response_type=ticket&ticket=t1' }
+
+    it('reads the last action_required until an action_done of its kind', () => {
         expect(pendingAction('Creating…\n')).toBeNull()
-        expect(pendingAction(signIn)).toEqual({ kind: 'github_sign_in', code: 'ABCD-1234', url: 'https://github.com/login/device' })
-        expect(pendingAction(`${signIn}Signed in as octo\n`)).toBeNull()
-        expect(pendingAction(`${signIn}Signed in as octo\nInstall it at https://github.com/apps/nera-static/installations/new\n`))
-            .toEqual({ kind: 'github_app_install', url: 'https://github.com/apps/nera-static/installations/new' })
-        expect(pendingAction('Install it at https://github.com/apps/nera-static/installations/new\nNera Static is installed on octo.\n')).toBeNull()
-        expect(pendingAction('To sign in to Netlify, open https://app.netlify.com/authorize?response_type=ticket&ticket=t1 and choose "Authorize".\n'))
-            .toEqual({ kind: 'netlify_sign_in', url: 'https://app.netlify.com/authorize?response_type=ticket&ticket=t1' })
+        expect(pendingAction(required(signIn))).toEqual(signIn)
+        expect(pendingAction(`${required(signIn)}Signed in as octo\n${done('github_sign_in')}`)).toBeNull()
+        expect(pendingAction(`${required(signIn)}${done('github_sign_in')}${required(install)}`)).toEqual(install)
+        expect(pendingAction(`${required(install)}${done('github_app_install')}`)).toBeNull()
+        expect(pendingAction(required(netlify))).toEqual(netlify)
     })
 
-    it('reads no code from a line of another shape or another host', () => {
-        expect(pendingAction('To sign in to GitHub, enter the code ghp_secret at https://evil.example/device\n')).toBeNull()
-        expect(pendingAction('token: gho_abcdefABCDEF1234\n')).toBeNull()
+    it('clears a pending action only with an action_done of the same kind', () => {
+        expect(pendingAction(`${required(signIn)}${done('github_app_install')}`)).toEqual(signIn)
+        expect(pendingAction(`${required(install)}${done('netlify_sign_in')}${done('nonsense')}`)).toEqual(install)
+    })
+
+    it('reads nothing from the CLI\'s log lines alone', () => {
+        expect(pendingAction('To sign in to GitHub, enter the code ABCD-1234 at https://github.com/login/device\n')).toBeNull()
+        expect(pendingAction('Install it at https://github.com/apps/nera-static/installations/new\n')).toBeNull()
+        expect(pendingAction('To sign in to Netlify, open https://app.netlify.com/authorize?ticket=t1 and choose "Authorize".\n')).toBeNull()
+    })
+
+    it('ignores an event of an unknown kind, a foreign host, a bad code or a broken line', () => {
+        const ignored = [
+            required({ kind: 'paypal_sign_in', url: 'https://github.com/x' }),
+            required({ kind: 'toString', url: 'https://github.com/x' }),
+            required({ ...signIn, url: 'https://evil.example/device' }),
+            required({ ...signIn, url: 'http://github.com/login/device' }),
+            required({ ...signIn, url: 'https://github.com.evil.example/login/device' }),
+            required({ ...install, url: 'https://github.com/apps/x y' }),
+            required({ ...netlify, url: 'https://github.com/authorize' }),
+            required({ ...signIn, code: 'ghp_secret' }),
+            required({ kind: 'github_sign_in', url: signIn.url }),
+            `${JSON.stringify({ event: 'action_required' })}\n`,
+            `${JSON.stringify({ event: 'action_required', action: null })}\n`,
+            `${JSON.stringify({ action: signIn })}\n`,
+            '{"event":"action_required","action":{"kind":"github_sign_in"\n',
+            '{not json\n',
+            'null\n',
+            'token: gho_abcdefABCDEF1234\n',
+        ]
+        for (const line of ignored) expect(pendingAction(line), line).toBeNull()
+        // an ignored event leaves the pending one standing
+        expect(pendingAction(`${required(install)}${ignored.join('')}`)).toEqual(install)
+    })
+
+    it('returns only kind, code and url, whatever else the event carries', () => {
+        expect(pendingAction(required({ ...signIn, device_code: 'secret', extra: 1 }))).toEqual(signIn)
+        expect(pendingAction(required({ ...install, code: 'ABCD-1234' }))).toEqual(install)
     })
 })
 

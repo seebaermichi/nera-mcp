@@ -19,33 +19,19 @@ const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, 'g')
 const LOCAL_URL = /Local:\s+(https?:\/\/[^\s]+)/
 
 /**
- * The lines of `nera publish` that ask the user to do something in the
- * browser, and the lines that say it is done. Only these fixed shapes are
- * read: the GitHub user code and verification page (the code is what the
- * user types; it is not a credential — the device code and the tokens never
- * appear in the CLI's output), the GitHub App installation page, and the
- * Netlify authorization page.
+ * The browser steps `nera publish --json` (@nera-static/nera ≥ 1.27.0)
+ * announces as event lines on stderr, `{"event":"action_required","action":
+ * {kind,code?,url}}` and `{"event":"action_done","kind"}`, and the host each
+ * one's page must be on. An event counts only in this shape: a known kind, an
+ * `https://` page on its host and, for the GitHub sign-in, a user code of the
+ * user-code shape (what the user types; it is not a credential — the device
+ * code and the tokens never appear in the CLI's output).
  */
-const ACTIONS = [
-    {
-        kind: 'github_sign_in',
-        match: /To sign in to GitHub, enter the code ([A-Z0-9]{4,8}-[A-Z0-9]{4,8}) at (https:\/\/github\.com\/\S+)/,
-        action: ([, code, url]) => ({ kind: 'github_sign_in', code, url }),
-        done: /^Signed in as /,
-    },
-    {
-        kind: 'github_app_install',
-        match: /Install it at (https:\/\/github\.com\/apps\/\S+)/,
-        action: ([, url]) => ({ kind: 'github_app_install', url }),
-        done: /^Nera Static is installed on /,
-    },
-    {
-        kind: 'netlify_sign_in',
-        match: /To sign in to Netlify, open (https:\/\/app\.netlify\.com\/\S+) and choose "Authorize"/,
-        action: ([, url]) => ({ kind: 'netlify_sign_in', url }),
-        done: /^Signed in to Netlify/,
-    },
-]
+const ACTIONS = {
+    github_sign_in: { host: 'github.com', code: /^[A-Z0-9]{4,8}-[A-Z0-9]{4,8}$/ },
+    github_app_install: { host: 'github.com' },
+    netlify_sign_in: { host: 'app.netlify.com' },
+}
 
 const INSTRUCTIONS = {
     github_sign_in: ({ code, url }) => `Ask the user to open ${url} and enter the code ${code}, then call publish again.`,
@@ -58,8 +44,49 @@ function lines(text) {
 }
 
 /**
- * What a running `nera publish` waits for: the last browser step it asked
- * for that it has not reported done since, or null.
+ * The event a line of `nera publish --json` carries, or null for a log line
+ * (and for a line that starts with `{` but is no JSON object with a string
+ * `event`). Never throws: it runs inside `waitFor`'s predicate.
+ *
+ * @param {string} line
+ * @returns {{ event: string, [key: string]: unknown }|null}
+ */
+function eventOf(line) {
+    if (!line.startsWith('{')) return null
+    try {
+        const parsed = JSON.parse(line)
+        return typeof parsed?.event === 'string' ? parsed : null
+    } catch {
+        return null
+    }
+}
+
+/** Whether `url` is one `https://` address, without whitespace, on exactly `host`. */
+function onHost(url, host) {
+    if (typeof url !== 'string' || /\s/.test(url)) return false
+    try {
+        const parsed = new URL(url)
+        return parsed.protocol === 'https:' && parsed.hostname === host
+    } catch {
+        return false
+    }
+}
+
+/** The action of an `action_required` event, reduced to `kind`, `code?` and `url`, or null when it is not of a known shape. */
+function knownAction(action) {
+    const kind = action?.kind
+    if (typeof kind !== 'string' || !Object.hasOwn(ACTIONS, kind)) return null
+    const known = ACTIONS[kind]
+    if (!onHost(action.url, known.host)) return null
+    if (!known.code) return { kind, url: action.url }
+    if (typeof action.code !== 'string' || !known.code.test(action.code)) return null
+    return { kind, code: action.code, url: action.url }
+}
+
+/**
+ * What a running `nera publish` waits for: the last browser step an
+ * `action_required` event asked for with no later `action_done` of the same
+ * kind, or null. Log lines never count, whatever they say.
  *
  * @param {string} stderr the CLI's log (`--json` mode logs to stderr)
  * @returns {{ kind: string, code?: string, url: string }|null}
@@ -67,17 +94,16 @@ function lines(text) {
 export function pendingAction(stderr) {
     let pending = null
     for (const line of lines(stderr)) {
-        for (const known of ACTIONS) {
-            const found = line.match(known.match)
-            if (found) pending = known.action(found)
-            else if (pending?.kind === known.kind && known.done.test(line)) pending = null
-        }
+        const event = eventOf(line)
+        if (event?.event === 'action_required') pending = knownAction(event.action) ?? pending
+        else if (event?.event === 'action_done' && pending?.kind === event.kind) pending = null
     }
     return pending
 }
 
+/** The CLI's last log line, the event lines skipped, cut to PROGRESS_MAX. */
 function lastProgress(stderr) {
-    const last = lines(stderr).at(-1) ?? ''
+    const last = lines(stderr).findLast((line) => eventOf(line) === null) ?? ''
     return last.length > PROGRESS_MAX ? `${last.slice(0, PROGRESS_MAX)}…` : last
 }
 
