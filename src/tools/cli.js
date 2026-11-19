@@ -58,16 +58,15 @@ async function starterArg(ctx, starter) {
 }
 
 /**
- * The npm package of an `add_plugin` spec: `@nera-static/plugin-<name>` or
- * just `<name>`; anything else (another scope, a version, a path, a URL) is
+ * The npm package of an `add_plugin` spec, in the same forms the CLI's
+ * addPlugin takes: `@nera-static/plugin-<name>`, `plugin-<name>` or just
+ * `<name>`; anything else (another scope, a version, a path, a URL) is
  * refused.
  */
 function pluginPackage(spec) {
-    // The same forms the CLI's addPlugin takes: `@nera-static/plugin-<name>`,
-    // `plugin-<name>` or `<name>`.
     const name = spec.replace(new RegExp(`^(${PLUGIN_SCOPE}plugin-|plugin-)`), '')
     if (!PLUGIN_NAME.test(name) || NOT_PLUGINS.has(name)) {
-        throw new ToolError(`"${spec}" is not a Nera plugin. Pass an official plugin as \`@nera-static/plugin-<name>\` or just \`<name>\` (e.g. \`sitemap\`); call list_plugins for the catalog.`)
+        throw new ToolError(`"${spec}" is not a Nera plugin. Pass an official plugin as \`@nera-static/plugin-<name>\`, \`plugin-<name>\` or just \`<name>\` (e.g. \`sitemap\`); call list_plugins for the catalog.`)
     }
     return { name, pkg: `${PLUGIN_SCOPE}plugin-${name}` }
 }
@@ -183,7 +182,7 @@ export function registerCliTools(server, ctx) {
         description: 'Installs an official Nera plugin into a site (npm install), copies its default configuration to `config/<name>.yaml` when the site has none, and copies its Pug templates to `views/vendor/plugin-<name>/` when it ships any. Call list_plugins for the catalog. Afterwards read the plugin\'s config with read_file and include its templates in a layout with write_file, then validate.',
         inputSchema: {
             site: siteInput,
-            plugin: z.string().describe('The plugin, as `@nera-static/plugin-<name>` or just `<name>` (e.g. `sitemap`, `tags`).'),
+            plugin: z.string().describe('The plugin, as `@nera-static/plugin-<name>`, `plugin-<name>` or just `<name>` (e.g. `sitemap`, `tags`).'),
         },
     }, tool(async ({ site, plugin }, { signal }) => {
         const { name, pkg } = pluginPackage(plugin)

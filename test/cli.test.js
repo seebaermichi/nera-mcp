@@ -428,6 +428,12 @@ describe('add_plugin', () => {
         expect(result.structuredContent.config.file).toBe('config/tags.yaml')
     })
 
+    it('names all three accepted forms in the `plugin` input\'s description', async () => {
+        const { tools } = await mcp.client.listTools()
+        const { inputSchema } = tools.find((t) => t.name === 'add_plugin')
+        expect(inputSchema.properties.plugin.description).toContain('`@nera-static/plugin-<name>`, `plugin-<name>` or just `<name>`')
+    })
+
     it('reports `none` for a plugin without a default config', async () => {
         respond = async () => {
             await writeFiles(pluginDir(), { 'package.json': '{"name":"@nera-static/plugin-tags"}' })
@@ -459,6 +465,7 @@ describe('add_plugin', () => {
             const result = await mcp.call('add_plugin', { site: 'site', plugin })
             expect(result.isError).toBe(true)
             expect(textOf(result)).toMatch(/is not a Nera plugin.*list_plugins/)
+            expect(textOf(result)).toContain('`@nera-static/plugin-<name>`, `plugin-<name>` or just `<name>`')
             expect(added).toEqual([])
             expect(children).toEqual([])
         },
