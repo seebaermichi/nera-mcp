@@ -106,13 +106,13 @@ A **site** is a folder under the root (or the root itself) whose `package.json` 
 | `get_site` | A site's configuration, pages, plugins and theme |
 | `read_page`, `write_page`, `delete_page` | A Markdown page with its frontmatter; `write_page` refuses frontmatter without `layout` |
 | `read_file`, `write_file` | Configuration, templates and assets inside a site |
-| `add_plugin` | Installs an `@nera-static/plugin-*`, copies its default config and publishes its templates |
+| `add_plugin` | Installs an official plugin (`@nera-static/plugin-<name>`, `plugin-<name>` or `<name>`) as `nera add` does: the package, its default config and its templates |
 | `build` | `nera build`, optionally with the output checks (`check: true`) |
 | `validate` | `nera validate`: the site's layouts, includes and YAML, as `{ file, line, severity, rule, message }` records |
 | `preview` | Starts `nera dev` and returns the local address; `stop: true` stops it |
 | `publish` | `nera publish` to GitHub Pages or Netlify; returns the sign-in code for you, then the live address |
 
-`create_site`, `validate` and the catalogs call `@nera-static/nera`'s own functions inside the server; `build`, `preview`, `publish` and `add_plugin` run commands, through the site's own `@nera-static/nera` when it has one installed, so the assistant gets the same results as you do in a terminal. A preview or a publish keeps running between calls and stops when the client closes the server.
+`create_site`, `add_plugin`, `validate` and the catalogs call `@nera-static/nera`'s own functions inside the server; `build`, `preview` and `publish` run commands, through the site's own `@nera-static/nera` when it has one installed, so the assistant gets the same results as you do in a terminal. A preview or a publish keeps running between calls and stops when the client closes the server.
 
 ### Resources
 

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-11-19
+
+### Changed
+
+-   `add_plugin` installs the plugin with `addPlugin()` from `@nera-static/nera` inside the server instead of running `npm install`, its own config copy and the package's template script itself. Its inputs, refusals and result shape are unchanged; the result's `log` holds `addPlugin`'s progress lines, while npm's and the template script's output goes to the server's log (stderr). Cancelling the call stops the running command, and with `NERA_MCP_RUNTIME=bundled` it gets the same environment as every other command.
+-   `add_plugin` refuses a config folder or `config/<name>.yaml` that is a symbolic link out of the site before anything is installed.
+-   Requires `@nera-static/nera` ^1.26.0 (was ^1.25.0), the first release with `addPlugin`.
+
+### Fixed
+
+-   `add_plugin` accepts `plugin-<name>` (e.g. `plugin-tags`) like the CLI; it used to ask npm for `@nera-static/plugin-plugin-tags`.
+
 ## [1.2.0] - 2026-11-18
 
 ### Added
