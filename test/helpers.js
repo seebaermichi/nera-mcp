@@ -71,6 +71,7 @@ export async function connect(root, options = {}) {
         root,
         runner: options.runner ?? (async () => { throw new Error('runner not expected in this test') }),
         createSite: options.createSite,
+        addPlugin: options.addPlugin,
         fetch: options.fetch ?? (async () => { throw new Error('fetch not expected in this test') }),
         docsFile: options.docsFile,
         processes: options.processes,

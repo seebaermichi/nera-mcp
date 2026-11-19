@@ -1,5 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { createSite as neraCreateSite } from '@nera-static/nera'
+import { addPlugin as neraAddPlugin, createSite as neraCreateSite } from '@nera-static/nera'
 import pkg from '../package.json' with { type: 'json' }
 import { registerCatalogTools } from './catalog.js'
 import { realRoot } from './paths.js'
@@ -19,8 +19,9 @@ import { registerSiteTools } from './tools/sites.js'
  *
  * @param {object} options
  * @param {string} options.root the folder the server may work in; every path a tool takes is checked against it
- * @param {ReturnType<typeof createRunner>} [options.runner] runs the `nera`, `npm` and `node` commands (injected so tests spawn nothing)
+ * @param {ReturnType<typeof createRunner>} [options.runner] runs the `nera` commands `build` starts (injected so tests spawn nothing)
  * @param {typeof neraCreateSite} [options.createSite] writes a new site's files for `create_site` (the CLI's `createSite`; injected so tests need no network for package and GitHub starters)
+ * @param {typeof neraAddPlugin} [options.addPlugin] installs a plugin for `add_plugin` (the CLI's `addPlugin`; injected so tests need no network)
  * @param {typeof fetch} [options.fetch] fetches the npm registry catalogs (injected so tests stay offline)
  * @param {string} [options.docsFile] the bundled `llms-full.txt` (default: the package's `docs/`; injected so tests can point at a missing one)
  * @param {ReturnType<typeof createProcesses>} [options.processes] tracks the children that outlive a call (`preview`, `publish`); all are stopped when the server closes
@@ -28,8 +29,8 @@ import { registerSiteTools } from './tools/sites.js'
  * @returns {Promise<McpServer>}
  * @throws {import('./paths.js').PathError} when `root` does not exist or is not a folder
  */
-export async function createServer({ root, runner = createRunner(), createSite = neraCreateSite, fetch = globalThis.fetch, docsFile, processes = createProcesses(), timing }) {
-    const ctx = { root: await realRoot(root), runner, createSite, fetch, docsFile, processes, timing }
+export async function createServer({ root, runner = createRunner(), createSite = neraCreateSite, addPlugin = neraAddPlugin, fetch = globalThis.fetch, docsFile, processes = createProcesses(), timing }) {
+    const ctx = { root: await realRoot(root), runner, createSite, addPlugin, fetch, docsFile, processes, timing }
     const server = new McpServer(
         { name: pkg.name, version: pkg.version },
         {

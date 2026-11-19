@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { hasErrors, validate } from '@nera-static/nera'
 import { z } from 'zod'
-import { PathError, resolveInRoot } from '../paths.js'
+import { resolveInRoot } from '../paths.js'
 import { ok, tool, ToolError } from '../results.js'
 import { childEnv } from '../runner.js'
 import { relativeTo, resolveSite, siteFolders, siteInput } from './sites.js'
@@ -63,7 +63,9 @@ async function starterArg(ctx, starter) {
  * refused.
  */
 function pluginPackage(spec) {
-    const name = spec.startsWith(`${PLUGIN_SCOPE}plugin-`) ? spec.slice(`${PLUGIN_SCOPE}plugin-`.length) : spec
+    // The same forms the CLI's addPlugin takes: `@nera-static/plugin-<name>`,
+    // `plugin-<name>` or `<name>`.
+    const name = spec.replace(new RegExp(`^(${PLUGIN_SCOPE}plugin-|plugin-)`), '')
     if (!PLUGIN_NAME.test(name) || NOT_PLUGINS.has(name)) {
         throw new ToolError(`"${spec}" is not a Nera plugin. Pass an official plugin as \`@nera-static/plugin-<name>\` or just \`<name>\` (e.g. \`sitemap\`); call list_plugins for the catalog.`)
     }
@@ -71,54 +73,10 @@ function pluginPackage(spec) {
 }
 
 /**
- * Copies the plugin's default `config/<name>.yaml` into the site's config
- * folder when the site has none, so the model can read and edit it.
- *
- * @returns {Promise<{ file: string, status: 'copied'|'kept'|'none' }>}
- */
-async function copyDefaultConfig(dir, packageDir, configFolder, name) {
-    const target = await resolveInRoot(dir, path.join(configFolder, `${name}.yaml`), { label: 'plugin config file' })
-    const file = relativeTo(dir, target)
-    let source
-    try {
-        source = await resolveInRoot(dir, path.join(packageDir, 'config', `${name}.yaml`), { label: 'plugin default config' })
-        await fs.access(source)
-    } catch (error) {
-        if (error instanceof PathError || error.code === 'ENOENT') return { file, status: 'none' }
-        throw error
-    }
-    await fs.mkdir(path.dirname(target), { recursive: true })
-    try {
-        await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL)
-        return { file, status: 'copied' }
-    } catch (error) {
-        if (error.code === 'EEXIST') return { file, status: 'kept' }
-        throw error
-    }
-}
-
-/**
- * The package's template-publishing script (the `bin` entry that points at
- * `publish-template.js`), checked to stay inside the site, or null.
- */
-async function publishTemplateScript(dir, packageDir) {
-    let pkg
-    try {
-        pkg = JSON.parse(await fs.readFile(path.join(dir, packageDir, 'package.json'), 'utf8'))
-    } catch {
-        return null
-    }
-    const bins = typeof pkg.bin === 'string' ? [pkg.bin] : Object.values(pkg.bin ?? {})
-    const script = bins.find((bin) => typeof bin === 'string' && path.basename(bin) === 'publish-template.js')
-    if (!script) return null
-    return resolveInRoot(dir, path.join(packageDir, script), { label: 'plugin template script' })
-}
-
-/**
  * Registers `create_site`, `build`, `validate` and `add_plugin`.
  *
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
- * @param {{ root: string, runner: ReturnType<typeof import('../runner.js').createRunner>, createSite: typeof import('@nera-static/nera').createSite }} ctx `create_site` installs through `createSite`, the other tools through `runner`
+ * @param {{ root: string, runner: ReturnType<typeof import('../runner.js').createRunner>, createSite: typeof import('@nera-static/nera').createSite, addPlugin: typeof import('@nera-static/nera').addPlugin }} ctx `create_site` installs through `createSite`, `add_plugin` through `addPlugin`, `build` through `runner`
  */
 export function registerCliTools(server, ctx) {
     server.registerTool('create_site', {
@@ -230,33 +188,36 @@ export function registerCliTools(server, ctx) {
     }, tool(async ({ site, plugin }, { signal }) => {
         const { name, pkg } = pluginPackage(plugin)
         const resolved = await resolveSite(ctx, site)
-        const install = await ctx.runner('npm', ['install', pkg], { cwd: resolved.dir, signal })
-        if (install.code !== 0) {
-            throw new ToolError(`Installing ${pkg} failed: ${failureText(install)}`)
-        }
-
-        const packageDir = path.join('node_modules', ...pkg.split('/'))
+        // addPlugin writes `<folders.config>/<name>.yaml` without checking
+        // where it leads, so a config folder or file that is a symbolic link
+        // out of the site is refused here, before npm runs.
         const { model } = await siteFolders(resolved.dir)
-        const config = await copyDefaultConfig(resolved.dir, packageDir, model.folders.config, name)
+        await resolveInRoot(resolved.dir, path.join(model.folders.config, `${name}.yaml`), { label: 'plugin config file' })
 
-        let templates = 'none'
-        const script = await publishTemplateScript(resolved.dir, packageDir)
-        if (script) {
-            const publish = await ctx.runner('node', [script], { cwd: resolved.dir, signal })
-            if (publish.code !== 0) {
-                throw new ToolError(`${pkg} is installed, but copying its templates failed: ${failureText(publish)}`)
-            }
-            templates = 'published'
+        // As for create_site: every progress line is collected for the
+        // result, npm's and the template script's output goes to stderr
+        // (addPlugin's default), `env` is a child's and the call's signal
+        // stops the running child.
+        const lines = []
+        let added
+        try {
+            added = await ctx.addPlugin(pkg, { cwd: resolved.dir, signal, env: childEnv(), log: (line) => lines.push(line) })
+        } catch (error) {
+            // A command that ran and failed (npm install, the template
+            // script) carries its exit code; its own output is not captured.
+            const childFailed = !signal.aborted && typeof error.cause?.code === 'number'
+            throw new ToolError(childFailed ? `${error.message}\nThe command's own output is in the server's log. Fix what it reports (for npm often the network connection), then call add_plugin again.` : error.message)
         }
 
+        const { config, templates } = added
         const steps = [
             config.status === 'copied' ? `its configuration is in ${config.file}` : null,
             config.status === 'kept' ? `the site's own ${config.file} was kept` : null,
             templates === 'published' ? 'its templates are in the site\'s views/vendor folder' : null,
         ].filter(Boolean)
         return ok(
-            { site: resolved.site, plugin: pkg, config, templates, log: tail(install.stdout) },
-            `Installed ${pkg} in "${resolved.site}"${steps.length ? `; ${steps.join(', ')}` : ''}. Then call validate.`,
+            { site: resolved.site, plugin: added.plugin, config, templates, log: tail(lines.join('\n')) },
+            `Installed ${added.plugin} in "${resolved.site}"${steps.length ? `; ${steps.join(', ')}` : ''}. Then call validate.`,
         )
     }))
 }

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createSite, validate } from '@nera-static/nera'
+import { addPlugin, createSite, validate } from '@nera-static/nera'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activateShim } from '../src/runtime.js'
 import { connect, makeRoot, siteFiles, textOf, writeFiles } from './helpers.js'
@@ -12,6 +12,8 @@ let calls
 let respond
 let signals
 let created
+let added
+let children
 
 /** A fake runner: records every call, answers with `respond(call)` (default: success, no output). */
 async function fakeRunner(command, args, options) {
@@ -30,13 +32,42 @@ async function offlineCreateSite(name, options) {
     return createSite(name, { ...options, install: false })
 }
 
+/**
+ * A stand-in for a child `addPlugin` starts (npm install, the template bin),
+ * through the `runNpm`/`runNode` options its public wrapper forwards:
+ * records it in `children`, answers with `respond(call)` and fails like the
+ * CLI's spawnChild on a non-zero exit (an error carrying `code`).
+ */
+function fakeChild(command) {
+    return async (args, options) => {
+        const call = { command, args, cwd: options.cwd }
+        children.push(call)
+        const { code = 0, stdout = '' } = await respond(call)
+        if (code !== 0) {
+            throw Object.assign(new Error(`Command failed: ${command} ${args.join(' ')} (exit code ${code})`), { code })
+        }
+        return stdout
+    }
+}
+
+/**
+ * The CLI's real addPlugin with its children stubbed (no network): records
+ * the options the tool passes, then runs it with `fakeChild`s.
+ */
+async function offlineAddPlugin(spec, options) {
+    added.push({ spec, ...options })
+    return addPlugin(spec, { ...options, runNpm: fakeChild('npm'), runNode: fakeChild('node') })
+}
+
 beforeEach(async () => {
     env = await makeRoot()
     calls = []
     signals = []
     created = []
+    added = []
+    children = []
     respond = async () => ({})
-    mcp = await connect(env.root, { runner: fakeRunner, createSite: offlineCreateSite })
+    mcp = await connect(env.root, { runner: fakeRunner, createSite: offlineCreateSite, addPlugin: offlineAddPlugin })
 })
 
 afterEach(async () => {
@@ -333,6 +364,7 @@ describe('validate', () => {
 
 describe('add_plugin', () => {
     const pluginDir = () => path.join(env.site, 'node_modules', '@nera-static', 'plugin-tags')
+    const script = () => path.join(pluginDir(), 'bin', 'publish-template.js')
 
     beforeEach(() => {
         // `npm install @nera-static/plugin-tags` leaves the package in node_modules.
@@ -343,25 +375,36 @@ describe('add_plugin', () => {
                 'config/tags.yaml': 'meta_property_name: tags\n',
                 'bin/publish-template.js': '',
             })
-            return { stdout: 'added 1 package\n' }
+            return {}
         }
     })
 
-    it('installs the plugin, copies its default config and publishes its templates', async () => {
+    it('adds the plugin with the CLI\'s addPlugin: installs it, copies its default config and publishes its templates', async () => {
         const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
         expect(result.isError).toBeUndefined()
-        expect(calls).toEqual([
+        expect(children).toEqual([
             { command: 'npm', args: ['install', '@nera-static/plugin-tags'], cwd: env.site },
-            { command: 'node', args: [path.join(pluginDir(), 'bin', 'publish-template.js')], cwd: env.site },
+            { command: 'node', args: [script()], cwd: env.site },
         ])
+        expect(calls).toEqual([])
+        expect(added).toHaveLength(1)
+        expect(added[0]).toMatchObject({ spec: '@nera-static/plugin-tags', cwd: env.site })
+        expect(added[0].signal).toBeInstanceOf(AbortSignal)
+        expect(added[0].env.PATH).toBe(process.env.PATH)
+        expect(added[0].log).toBeTypeOf('function')
+        // No `stdio`: npm's and the template bin's output goes where the CLI's addPlugin sends it, to stderr.
+        expect(added[0]).not.toHaveProperty('stdio')
         expect(await fs.readFile(path.join(env.site, 'config', 'tags.yaml'), 'utf8')).toBe('meta_property_name: tags\n')
-        expect(result.structuredContent).toEqual({
+        const { log, ...rest } = result.structuredContent
+        expect(rest).toEqual({
             site: 'site',
             plugin: '@nera-static/plugin-tags',
             config: { file: 'config/tags.yaml', status: 'copied' },
             templates: 'published',
-            log: 'added 1 package',
         })
+        expect(log).toMatch(/Installing @nera-static\/plugin-tags/)
+        expect(log).toMatch(/Default configuration copied to config\/tags\.yaml/)
+        expect(textOf(result)).toBe('Installed @nera-static/plugin-tags in "site"; its configuration is in config/tags.yaml, its templates are in the site\'s views/vendor folder. Then call validate.')
     })
 
     it('keeps the site\'s own config and skips templates when the plugin ships none', async () => {
@@ -374,20 +417,40 @@ describe('add_plugin', () => {
         expect(await fs.readFile(path.join(env.site, 'config', 'tags.yaml'), 'utf8')).toBe('mine: true\n')
         expect(result.structuredContent.config).toEqual({ file: 'config/tags.yaml', status: 'kept' })
         expect(result.structuredContent.templates).toBe('none')
-        expect(calls.map((c) => c.command)).toEqual(['npm'])
+        expect(children.map((c) => c.command)).toEqual(['npm'])
+        expect(textOf(result)).toMatch(/the site's own config\/tags\.yaml was kept\. Then call validate\.$/)
     })
 
-    it('refuses a template script that leads outside the site', async () => {
+    it('takes `plugin-<name>` like the CLI does', async () => {
+        const result = await mcp.call('add_plugin', { site: 'site', plugin: 'plugin-tags' })
+        expect(result.isError).toBeUndefined()
+        expect(children[0].args).toEqual(['install', '@nera-static/plugin-tags'])
+        expect(result.structuredContent.config.file).toBe('config/tags.yaml')
+    })
+
+    it('reports `none` for a plugin without a default config', async () => {
+        respond = async () => {
+            await writeFiles(pluginDir(), { 'package.json': '{"name":"@nera-static/plugin-tags"}' })
+            return {}
+        }
+        const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+        expect(result.structuredContent.config).toEqual({ file: 'config/tags.yaml', status: 'none' })
+        expect(await exists(path.join(env.site, 'config', 'tags.yaml'))).toBe(false)
+        expect(textOf(result)).toBe('Installed @nera-static/plugin-tags in "site". Then call validate.')
+    })
+
+    it('refuses a template script that leads outside the package, without running it', async () => {
+        await writeFiles(env.outside, { 'publish-template.js': '' })
         respond = async ({ command }) => {
             if (command === 'npm') {
-                await writeFiles(pluginDir(), { 'package.json': JSON.stringify({ bin: { x: '../../../../outside/publish-template.js' } }) })
+                await writeFiles(pluginDir(), { 'package.json': JSON.stringify({ bin: { x: '../../../../../outside/publish-template.js' } }) })
             }
             return {}
         }
         const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
         expect(result.isError).toBe(true)
-        expect(textOf(result)).toMatch(/plugin template script/)
-        expect(calls.map((c) => c.command)).toEqual(['npm'])
+        expect(textOf(result)).toMatch(/template script "\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/outside\/publish-template\.js" lies outside the package; it was not run/)
+        expect(children.map((c) => c.command)).toEqual(['npm'])
     })
 
     it.each(['lodash@4', '@other/plugin-tags', 'tags@3.0.0', 'utils', '@nera-static/plugin-utils', '../outside', 'file:../outside', 'Tags', ''])(
@@ -395,29 +458,107 @@ describe('add_plugin', () => {
         async (plugin) => {
             const result = await mcp.call('add_plugin', { site: 'site', plugin })
             expect(result.isError).toBe(true)
-            expect(textOf(result)).toMatch(/is not a Nera plugin/)
-            expect(calls).toEqual([])
+            expect(textOf(result)).toMatch(/is not a Nera plugin.*list_plugins/)
+            expect(added).toEqual([])
+            expect(children).toEqual([])
         },
     )
 
-    it('reports a failed npm install', async () => {
-        respond = async () => ({ code: 1, stderr: 'npm error 404 Not Found\n' })
+    it('reports a failed npm install and where its output went', async () => {
+        respond = async () => ({ code: 1 })
         const result = await mcp.call('add_plugin', { site: 'site', plugin: 'nope' })
         expect(result.isError).toBe(true)
-        expect(textOf(result)).toBe('Installing @nera-static/plugin-nope failed: npm error 404 Not Found')
+        expect(textOf(result)).toMatch(/^Installing @nera-static\/plugin-nope failed: Command failed: npm install @nera-static\/plugin-nope \(exit code 1\)\nThe command's own output is in the server's log\./)
         expect(await exists(path.join(env.site, 'config', 'nope.yaml'))).toBe(false)
+    })
+
+    it('reports a failed template script as the plugin being installed', async () => {
+        const base = respond
+        respond = async (call) => (call.command === 'node' ? { code: 2 } : base(call))
+        const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+        expect(result.isError).toBe(true)
+        expect(textOf(result)).toMatch(/^@nera-static\/plugin-tags is installed, but publishing its templates failed: .*exit code 2\)\nThe command's own output is in the server's log\./)
+    })
+
+    it('gives addPlugin a child\'s env: the bundled runtime\'s shim folder first on the PATH', async () => {
+        activateShim('/shim')
+        const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+        expect(result.isError).toBeUndefined()
+        const delimiter = process.platform === 'win32' ? ';' : ':'
+        const pathOf = (vars) => Object.entries(vars).find(([key]) => key.toUpperCase() === 'PATH')[1]
+        expect(pathOf(added[0].env).split(delimiter)[0]).toBe('/shim')
+        expect(added[0].env.NO_COLOR).toBe('1')
+    })
+
+    it('aborts addPlugin when the call is cancelled', async () => {
+        let seen
+        await mcp.close()
+        mcp = await connect(env.root, {
+            runner: fakeRunner,
+            addPlugin: (spec, options) => new Promise((resolve, reject) => {
+                seen = options.signal
+                options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })
+            }),
+        })
+        const controller = new AbortController()
+        const pending = mcp.client.callTool({ name: 'add_plugin', arguments: { site: 'site', plugin: 'tags' } }, undefined, { signal: controller.signal })
+        await vi.waitFor(() => expect(seen).toBeInstanceOf(AbortSignal))
+        controller.abort()
+        await expect(pending).rejects.toThrow()
+        await vi.waitFor(() => expect(seen.aborted).toBe(true))
+        expect(calls).toEqual([])
+    })
+
+    it('writes nothing to stdout: every progress line lands in the result', async () => {
+        const stdout = vi.spyOn(process.stdout, 'write')
+        const log = vi.spyOn(console, 'log')
+        try {
+            const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+            expect(result.isError).toBeUndefined()
+            expect(result.structuredContent.log).toMatch(/Added @nera-static\/plugin-tags/)
+            expect(stdout).not.toHaveBeenCalled()
+            expect(log).not.toHaveBeenCalled()
+        } finally {
+            stdout.mockRestore()
+            log.mockRestore()
+        }
+    })
+
+    it('writes the config into the site\'s own config folder whatever app.yaml says about folders.config', async () => {
+        await writeFiles(env.site, { 'config/app.yaml': 'title: My site\nfolders:\n  config: ../../outside\n' })
+        const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+        expect(result.structuredContent.config).toEqual({ file: 'config/tags.yaml', status: 'copied' })
+        expect(await exists(path.join(env.outside, 'tags.yaml'))).toBe(false)
+    })
+
+    it.each([
+        ['a config folder', async () => {
+            await fs.rm(path.join(env.site, 'config'), { recursive: true })
+            await fs.symlink(env.outside, path.join(env.site, 'config'))
+        }],
+        ['a config file', async () => {
+            await fs.symlink(path.join(env.outside, 'tags.yaml'), path.join(env.site, 'config', 'tags.yaml'))
+        }],
+    ])('refuses %s that is a symbolic link out of the site, before installing', async (_, link) => {
+        await link()
+        const result = await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
+        expect(result.isError).toBe(true)
+        expect(textOf(result)).toMatch(/plugin config file "config\/tags\.yaml" (leads outside|goes through a broken symbolic link)/)
+        expect(added).toEqual([])
+        expect(children).toEqual([])
+        expect(await exists(path.join(env.outside, 'tags.yaml'))).toBe(false)
     })
 })
 
 describe('cancelling', () => {
     it('hands every command the request\'s abort signal, so a cancelled call or a closing server stops it', async () => {
-        await writeFiles(path.join(env.site, 'node_modules/@nera-static/plugin-tags'), { 'package.json': '{"bin":{"x":"bin/publish-template.js"}}', 'bin/publish-template.js': '' })
         respond = async ({ command }) => (command === 'nera' ? { stdout: '{"ok":true,"results":[]}' } : {})
         await mcp.call('create_site', { name: 'new-site' })
         await mcp.call('build', { site: 'site' })
         await mcp.call('add_plugin', { site: 'site', plugin: 'tags' })
         expect(created[0].signal).toBeInstanceOf(AbortSignal)
-        expect(calls.map((c) => `${c.command} ${c.args[0]}`)).toEqual(['nera build', 'npm install', `node ${path.join(env.site, 'node_modules/@nera-static/plugin-tags/bin/publish-template.js')}`])
+        expect(added[0].signal).toBeInstanceOf(AbortSignal)
+        expect(calls.map((c) => `${c.command} ${c.args[0]}`)).toEqual(['nera build'])
         for (const signal of signals) expect(signal).toBeInstanceOf(AbortSignal)
     })
 })
@@ -434,6 +575,7 @@ describe('the root guard on build, validate and add_plugin', () => {
             expect(textOf(result)).toMatch(/contains "\.\."|leads outside/)
         }
         expect(calls).toEqual([])
+        expect(added).toEqual([])
     })
 
     it.each(tools)('%s refuses a folder that is no Nera site', async (name, extra) => {
@@ -442,5 +584,6 @@ describe('the root guard on build, validate and add_plugin', () => {
         expect(result.isError).toBe(true)
         expect(textOf(result)).toMatch(/is not a Nera site/)
         expect(calls).toEqual([])
+        expect(added).toEqual([])
     })
 })
