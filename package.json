@@ -1,6 +1,6 @@
 {
     "name": "@nera-static/mcp",
-    "version": "1.2.1",
+    "version": "1.3.0",
     "description": "A local MCP server for Nera: lets an AI assistant create, edit, build, validate, preview and publish Nera static sites under one folder",
     "type": "module",
     "files": [

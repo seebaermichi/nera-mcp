@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-19
+
+### Changed
+
+-   `publish` learns that `nera publish` waits for the user (the GitHub sign-in code, the app installation, the Netlify authorization) and that the step is done from the CLI's JSON event lines on stderr instead of matching its human log lines, so a change in the CLI's wording no longer breaks it. An event still counts only for a known step, an `https://` page on that step's host and, for the GitHub sign-in, a code of the user-code shape. Its inputs and result shape are unchanged, and the last progress line it reports never shows an event line.
+-   `publish` refuses a site whose own `@nera-static/nera` is older than 1.27.0 (or whose version cannot be read) before it starts anything, with a hint to run `npm update` in the site: an older CLI writes no event lines, so the sign-in code would never reach the assistant. A publish already running is still reported.
+-   Requires `@nera-static/nera` ^1.27.0 (was ^1.26.0), the first release whose `publish --json` writes the event lines.
+
 ## [1.2.1] - 2026-11-19
 
 ### Changed

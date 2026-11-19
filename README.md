@@ -141,7 +141,7 @@ A **site** is a folder under the root (or the root itself) whose `package.json` 
 ## Compatibility
 
 -   Node.js 22.12 or later
--   Brings `@nera-static/nera` 1.25.0 for sites that have none installed. A site with its own CLI installed runs that one: `build` needs 1.9.0 or later (`--json`), `publish` 1.19.0 (1.20.0 for Netlify). `npm update` in the site brings it up to date.
+-   Brings `@nera-static/nera` 1.27.0 for sites that have none installed. A site with its own CLI installed runs that one: `build` needs 1.9.0 or later (`--json`), `publish` 1.27.0 or later for GitHub Pages and Netlify alike (its sign-in events), and refuses an older one. `npm update` in the site brings it up to date.
 
 ## License
 
