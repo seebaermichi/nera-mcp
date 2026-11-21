@@ -177,7 +177,7 @@ nera-mcp --http --port 8080 --host 127.0.0.1 --trust-proxy loopback
 -   `--port` (default `8080`, `0` picks a free one) and `--host` (default `127.0.0.1`, so only the proxy on the same machine reaches it).
 -   `--trust-proxy` tells the server which proxies to believe for the client's address, which the rate limits on the OAuth endpoints count by: a number of hops (`1`) or addresses (`loopback`, `10.0.0.0/8`). Without it no proxy is trusted, and behind a proxy every client shares one limit.
 -   A missing variable, a key of the wrong size or a taken port stop the server with exit code 1 and a message on stderr. `SIGTERM` lets running requests finish (up to 10 seconds), closes the database and exits 0.
--   Logs go to stderr and never contain a token, the key or the client secret. Our own access and refresh tokens are stored only as SHA-256 hashes (access tokens live 1 hour, refresh tokens 30 days and rotate on every use); GitHub's tokens are stored AES-256-GCM-encrypted.
+-   Logs go to stderr and never contain a token, the key or the client secret. Our own access and refresh tokens are stored only as SHA-256 hashes (access tokens live 1 hour, refresh tokens 30 days and rotate on every use). An authorization code or refresh token sent a second time is refused and revokes every token of that sign-in, so the client has to connect again. GitHub's tokens are stored AES-256-GCM-encrypted.
 
 ## License
 

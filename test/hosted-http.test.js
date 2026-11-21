@@ -94,11 +94,8 @@ async function register() {
     return response.json()
 }
 
-/**
- * Runs `/authorize` → consent page → Approve, in one browser. Returns what the
- * browser holds and where GitHub would be opened.
- */
-async function approveInBrowser(clientId, challenge, resource = url(MCP_PATH)) {
+/** Our `/authorize` URL for a client; `resource: null` leaves the parameter out. */
+function authorizeUrl(clientId, challenge, resource = url(MCP_PATH)) {
     const query = new URLSearchParams({
         response_type: 'code',
         client_id: clientId,
@@ -106,9 +103,17 @@ async function approveInBrowser(clientId, challenge, resource = url(MCP_PATH)) {
         code_challenge: challenge,
         code_challenge_method: 'S256',
         state: 'client-state',
-        resource,
+        ...(resource === null ? {} : { resource }),
     })
-    const page = await fetch(url(`/authorize?${query}`), { redirect: 'manual' })
+    return url(`/authorize?${query}`)
+}
+
+/**
+ * Runs `/authorize` → consent page → Approve, in one browser. Returns what the
+ * browser holds and where GitHub would be opened.
+ */
+async function approveInBrowser(clientId, challenge, resource) {
+    const page = await fetch(authorizeUrl(clientId, challenge, resource), { redirect: 'manual' })
     expect(page.status).toBe(200)
     const html = await page.text()
     const field = (name) => new RegExp(`name="${name}" value="([^"]*)"`).exec(html)[1]
@@ -128,25 +133,25 @@ function githubCallback(githubState, cookie) {
 }
 
 /** The whole browser part of the flow, ending with our code. */
-async function signIn() {
+async function signIn(resource) {
     const client = await register()
     const { verifier, challenge } = pkce()
-    const { cookie, githubState } = await approveInBrowser(client.client_id, challenge)
+    const { cookie, githubState } = await approveInBrowser(client.client_id, challenge, resource)
     const back = await githubCallback(githubState, cookie)
     expect(back.status).toBe(302)
     const location = new URL(back.headers.get('location'))
     return { client, verifier, location, code: location.searchParams.get('code') }
 }
 
-/** Exchanges a code at `/token`. */
-function exchangeCode(client, code, verifier) {
+/** Exchanges a code at `/token`; `resource: null` leaves the parameter out. */
+function exchangeCode(client, code, verifier, resource = url(MCP_PATH)) {
     return postForm('/token', {
         grant_type: 'authorization_code',
         client_id: client.client_id,
         code,
         code_verifier: verifier,
         redirect_uri: CLIENT_REDIRECT,
-        resource: url(MCP_PATH),
+        ...(resource === null ? {} : { resource }),
     })
 }
 
@@ -238,6 +243,26 @@ describe('registration and sign-in', () => {
         expect(await back.text()).toContain('expired or was already used')
     })
 
+    it('binds a sign-in without a resource to /mcp: its token is accepted there', async () => {
+        const { client, verifier, code } = await signIn(null)
+        const response = await exchangeCode(client, code, verifier, null)
+        expect(response.status).toBe(200)
+        const { access_token: token } = await response.json()
+        const mcp = await initialize({ Authorization: `Bearer ${token}` })
+        expect(mcp.status).toBe(200)
+    })
+
+    it('sends a foreign resource back to the client as invalid_target, never to the consent page', async () => {
+        const client = await register()
+        const response = await fetch(authorizeUrl(client.client_id, pkce().challenge, 'https://other.example/mcp'), { redirect: 'manual' })
+        expect(response.status).toBe(302)
+        expect(response.headers.get('set-cookie')).toBeNull()
+        const location = new URL(response.headers.get('location'))
+        expect(location.origin + location.pathname).toBe(CLIENT_REDIRECT)
+        expect(location.searchParams.get('error')).toBe('invalid_target')
+        expect(location.searchParams.get('state')).toBe('client-state')
+    })
+
     it('refuses a consent POST whose form token is not this browser\'s cookie', async () => {
         const response = await postForm(CONSENT_PATH, { state: 'any', csrf_token: 'forged', decision: 'approve' }, { Cookie: `${CONSENT_COOKIE}=victim` })
         expect(response.status).toBe(403)
@@ -258,6 +283,27 @@ describe('/token', () => {
         const again = await exchangeCode(client, code, verifier)
         expect(again.status).toBe(400)
         expect((await again.json()).error).toBe('invalid_grant')
+    })
+
+    it('revokes the tokens of a code\'s first use when the code is sent again', async () => {
+        const { client, verifier, code } = await signIn()
+        const first = await (await exchangeCode(client, code, verifier)).json()
+        const again = await exchangeCode(client, code, verifier)
+        expect(again.status).toBe(400)
+        expect((await again.json()).error).toBe('invalid_grant')
+        expect((await initialize({ Authorization: `Bearer ${first.access_token}` })).status).toBe(401)
+        const refreshed = await postForm('/token', { grant_type: 'refresh_token', client_id: client.client_id, refresh_token: first.refresh_token })
+        expect(refreshed.status).toBe(400)
+    })
+
+    it('revokes the current pair when an already rotated refresh token is sent again', async () => {
+        const { client, refresh_token: first } = await tokens()
+        const refresh = (token) => postForm('/token', { grant_type: 'refresh_token', client_id: client.client_id, refresh_token: token })
+        const current = await (await refresh(first)).json()
+        expect((await initialize({ Authorization: `Bearer ${current.access_token}` })).status).toBe(200)
+        expect((await refresh(first)).status).toBe(400)
+        expect((await initialize({ Authorization: `Bearer ${current.access_token}` })).status).toBe(401)
+        expect((await refresh(current.refresh_token)).status).toBe(400)
     })
 
     it('rotates the refresh token and refuses the old one', async () => {

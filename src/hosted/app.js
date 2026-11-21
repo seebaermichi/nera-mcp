@@ -67,7 +67,7 @@ function issuerUrl(issuer) {
 export function createHostedApp({ issuer, store, github, fetch = globalThis.fetch, now, log = () => {}, trustProxy = false }) {
     const base = issuerUrl(issuer)
     const resource = new URL(MCP_PATH, base)
-    const provider = createProvider({ store, github, now, log })
+    const provider = createProvider({ store, github, resource, now, log })
 
     const app = express()
     app.disable('x-powered-by')

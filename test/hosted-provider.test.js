@@ -96,7 +96,7 @@ beforeEach(() => {
         now,
     })
     logs = []
-    provider = createProvider({ store, github, now, log: (line) => logs.push(line) })
+    provider = createProvider({ store, github, resource: RESOURCE, now, log: (line) => logs.push(line) })
     store.saveClient(CLIENT)
     store.saveClient(OTHER_CLIENT)
 })
@@ -336,6 +336,38 @@ describe('consent page', () => {
     })
 })
 
+describe('the requested resource', () => {
+    it('defaults a missing resource to our /mcp, so the tokens name it', async () => {
+        const code = await signIn({ ...AUTH_PARAMS, resource: undefined })
+        const tokens = await provider.exchangeAuthorizationCode(CLIENT, code)
+        expect((await provider.verifyAccessToken(tokens.access_token)).resource.href).toBe(RESOURCE.href)
+    })
+
+    it('accepts our /mcp with a trailing slash or a fragment, as the /mcp guard does', async () => {
+        for (const resource of ['https://mcp.example/mcp/', 'https://mcp.example/mcp#x']) {
+            const code = await signIn({ ...AUTH_PARAMS, resource: new URL(resource) })
+            const tokens = await provider.exchangeAuthorizationCode(CLIENT, code, undefined, AUTH_PARAMS.redirectUri, new URL(resource))
+            expect((await provider.verifyAccessToken(tokens.access_token)).resource.href).toBe(RESOURCE.href)
+        }
+    })
+
+    it('refuses a foreign resource with invalid_target before the consent page', async () => {
+        for (const resource of ['https://other.example/mcp', 'https://mcp.example/other', 'https://mcp.example/mcp/tools']) {
+            const res = fakeResponse()
+            const error = await provider.authorize(CLIENT, { ...AUTH_PARAMS, resource: new URL(resource) }, res).catch((thrown) => thrown)
+            expect(error.errorCode).toBe('invalid_target')
+            expect(error.message).toContain(RESOURCE.href)
+            expect(res.body).toBeUndefined()
+            expect(res.headers['set-cookie']).toBeUndefined()
+        }
+        expect(gh.requests).toEqual([])
+    })
+
+    it('refuses to start without the hosted resource', () => {
+        expect(() => createProvider({ store, github })).toThrow(/protected resource/)
+    })
+})
+
 describe('the GitHub callback', () => {
     it('returns our code and the client\'s state to the client\'s redirect URI', async () => {
         const { state, cookie } = await startSignIn()
@@ -454,6 +486,21 @@ describe('authorization code', () => {
         expect(await oauthError(provider.exchangeAuthorizationCode(CLIENT, retargeted, undefined, AUTH_PARAMS.redirectUri, new URL('https://other.example/mcp')))).toBe('invalid_target')
     })
 
+    it('revokes the tokens of its first use when it comes again, at the PKCE lookup or the exchange', async () => {
+        for (const replay of [
+            (code) => provider.challengeForAuthorizationCode(CLIENT, code),
+            (code) => provider.exchangeAuthorizationCode(CLIENT, code, undefined, AUTH_PARAMS.redirectUri, RESOURCE),
+        ]) {
+            const code = await signIn()
+            const first = await provider.exchangeAuthorizationCode(CLIENT, code, undefined, AUTH_PARAMS.redirectUri, RESOURCE)
+            const rotated = await provider.exchangeRefreshToken(CLIENT, first.refresh_token)
+            expect(await oauthError(replay(code))).toBe('invalid_grant')
+            expect(await oauthError(provider.verifyAccessToken(first.access_token))).toBe('invalid_token')
+            expect(await oauthError(provider.verifyAccessToken(rotated.access_token))).toBe('invalid_token')
+            expect(await oauthError(provider.exchangeRefreshToken(CLIENT, rotated.refresh_token))).toBe('invalid_grant')
+        }
+    })
+
     it('keeps the request\'s resource when the token request names none', async () => {
         const code = await signIn()
         const tokens = await provider.exchangeAuthorizationCode(CLIENT, code)
@@ -484,6 +531,18 @@ describe('tokens', () => {
         const replay = await provider.exchangeRefreshToken(CLIENT, first.refresh_token).catch((thrown) => thrown)
         expect(replay.errorCode).toBe('invalid_grant')
         expect(replay.message).toMatch(/Sign in again/)
+    })
+
+    it('revokes the current pair when an already rotated refresh token comes again, and only that grant\'s', async () => {
+        const first = await tokensFor()
+        const other = await tokensFor()
+        const second = await provider.exchangeRefreshToken(CLIENT, first.refresh_token)
+        const third = await provider.exchangeRefreshToken(CLIENT, second.refresh_token)
+        expect(await oauthError(provider.exchangeRefreshToken(CLIENT, first.refresh_token))).toBe('invalid_grant')
+        expect(await oauthError(provider.verifyAccessToken(third.access_token))).toBe('invalid_token')
+        expect(await oauthError(provider.exchangeRefreshToken(CLIENT, third.refresh_token))).toBe('invalid_grant')
+        await expect(provider.verifyAccessToken(other.access_token)).resolves.toBeTruthy()
+        await expect(provider.exchangeRefreshToken(CLIENT, other.refresh_token)).resolves.toMatchObject({ token_type: 'Bearer' })
     })
 
     it('refuses another client\'s refresh token and a wider scope', async () => {

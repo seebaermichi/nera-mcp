@@ -6,10 +6,16 @@
 // What reaches the file: our codes, tokens, the GitHub `state` and the consent
 // page's browser token only as SHA-256 hashes (they are looked up, never read
 // back); GitHub's tokens and a client's secret AES-256-GCM-encrypted (they
-// must be read back). Only the
+// must be read back).
+//
+// Every code and the tokens issued from it share a `grant_id`, kept through
+// every refresh rotation. A used code and a rotated refresh token leave a
+// tombstone (their hash, the grant id, the expiry they had), so presenting
+// one again is recognised as a replay and revokes the whole grant (OAuth 2.1's
+// code reuse rule, the Security BCP's refresh-token reuse detection). Only the
 // hosted mode loads this module — `node:sqlite` needs Node >= 22.13, while the
 // stdio server (`src/server.js`) stays on the package's 22.12 floor.
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmodSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { decrypt, encrypt, hashToken, parseKey, randomToken } from './crypto.js'
@@ -38,6 +44,7 @@ CREATE TABLE IF NOT EXISTS pending (
 );
 CREATE TABLE IF NOT EXISTS codes (
     code_hash TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL,
     client_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     params TEXT NOT NULL,
@@ -46,10 +53,18 @@ CREATE TABLE IF NOT EXISTS codes (
 CREATE TABLE IF NOT EXISTS tokens (
     token_hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('access', 'refresh')),
+    grant_id TEXT NOT NULL,
     client_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     scopes TEXT NOT NULL,
     resource TEXT,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tokens_grant ON tokens (grant_id);
+CREATE TABLE IF NOT EXISTS tombstones (
+    hash TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('code', 'refresh')),
+    grant_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS github_users (
@@ -102,18 +117,21 @@ export function createStore({ file, key, now = Date.now }) {
         getPending: db.prepare('SELECT client_id, params, browser_hash, approved, expires_at FROM pending WHERE state_hash = ?'),
         approvePending: db.prepare('UPDATE pending SET approved = 1 WHERE state_hash = ? AND approved = 0'),
         takePending: db.prepare('DELETE FROM pending WHERE state_hash = ? RETURNING client_id, params, browser_hash, approved, expires_at'),
-        saveCode: db.prepare('INSERT INTO codes (code_hash, client_id, user_id, params, expires_at) VALUES (?, ?, ?, ?, ?)'),
-        getCode: db.prepare('SELECT client_id, user_id, params, expires_at FROM codes WHERE code_hash = ?'),
-        takeCode: db.prepare('DELETE FROM codes WHERE code_hash = ? RETURNING client_id, user_id, params, expires_at'),
-        saveToken: db.prepare('INSERT INTO tokens (token_hash, kind, client_id, user_id, scopes, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)'),
-        getToken: db.prepare('SELECT kind, client_id, user_id, scopes, resource, expires_at FROM tokens WHERE token_hash = ?'),
+        saveCode: db.prepare('INSERT INTO codes (code_hash, grant_id, client_id, user_id, params, expires_at) VALUES (?, ?, ?, ?, ?, ?)'),
+        getCode: db.prepare('SELECT grant_id, client_id, user_id, params, expires_at FROM codes WHERE code_hash = ?'),
+        takeCode: db.prepare('DELETE FROM codes WHERE code_hash = ? RETURNING grant_id, client_id, user_id, params, expires_at'),
+        saveToken: db.prepare('INSERT INTO tokens (token_hash, kind, grant_id, client_id, user_id, scopes, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
+        getToken: db.prepare('SELECT kind, grant_id, client_id, user_id, scopes, resource, expires_at FROM tokens WHERE token_hash = ?'),
         deleteToken: db.prepare('DELETE FROM tokens WHERE token_hash = ?'),
+        revokeGrant: db.prepare('DELETE FROM tokens WHERE grant_id = ?'),
+        saveTombstone: db.prepare('INSERT OR REPLACE INTO tombstones (hash, kind, grant_id, expires_at) VALUES (?, ?, ?, ?)'),
+        getTombstone: db.prepare('SELECT kind, grant_id, expires_at FROM tombstones WHERE hash = ?'),
         revokeToken: db.prepare('DELETE FROM tokens WHERE token_hash = ? AND client_id = ?'),
         saveGithubUser: db.prepare(`INSERT OR REPLACE INTO github_users
             (user_id, login, access_token, access_expires_at, refresh_token, refresh_expires_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)`),
         getGithubUser: db.prepare('SELECT * FROM github_users WHERE user_id = ?'),
-        purge: ['pending', 'codes', 'tokens'].map((table) => db.prepare(`DELETE FROM ${table} WHERE expires_at <= ?`)),
+        purge: ['pending', 'codes', 'tokens', 'tombstones'].map((table) => db.prepare(`DELETE FROM ${table} WHERE expires_at <= ?`)),
     }
 
     const live = (row) => (row && row.expires_at > seconds() ? row : null)
@@ -125,7 +143,7 @@ export function createStore({ file, key, now = Date.now }) {
         if (!own || !sameBrowser(own, browserToken)) return null
         return { clientId: own.client_id, params: JSON.parse(own.params), approved: own.approved === 1 }
     }
-    const codeRecord = (row) => row && { clientId: row.client_id, userId: row.user_id, ...JSON.parse(row.params), expiresAt: row.expires_at }
+    const codeRecord = (row) => row && { grantId: row.grant_id, clientId: row.client_id, userId: row.user_id, ...JSON.parse(row.params), expiresAt: row.expires_at }
     const tokenRecord = (row) => row && {
         kind: row.kind,
         clientId: row.client_id,
@@ -136,19 +154,46 @@ export function createStore({ file, key, now = Date.now }) {
     }
 
     /**
+     * Marks a used code or a rotated refresh token, so presenting it again is
+     * recognised as a replay until the moment it would have expired anyway.
+     * Only its hash is kept, as in `codes` and `tokens`.
+     *
+     * @param {string} hash
+     * @param {'code'|'refresh'} kind
+     * @param {{grant_id: string, expires_at: number}} row the used code's or token's row
+     */
+    function bury(hash, kind, row) {
+        statements.saveTombstone.run(hash, kind, row.grant_id, row.expires_at)
+    }
+
+    /**
+     * When `hash` is a used code or rotated refresh token of `kind` presented
+     * again, revokes every token of its grant: one of the two holders is not
+     * the legitimate client, and we cannot tell which.
+     *
+     * @param {string} hash
+     * @param {'code'|'refresh'} kind
+     */
+    function revokeOnReplay(hash, kind) {
+        const tombstone = live(statements.getTombstone.get(hash))
+        if (tombstone?.kind === kind) statements.revokeGrant.run(tombstone.grant_id)
+    }
+
+    /**
      * Issues a fresh access + refresh token pair; only their hashes are stored.
      *
-     * @param {{clientId: string, userId: string, scopes?: string[], resource?: string}} grant
+     * @param {{clientId: string, userId: string, scopes?: string[], resource?: string, grantId?: string}} grant
+     *   `grantId` ties the pair to its code and earlier rotations; a new grant when absent
      */
-    function issueTokens({ clientId, userId, scopes = [], resource }) {
+    function issueTokens({ clientId, userId, scopes = [], resource, grantId = randomUUID() }) {
         const issued = seconds()
         const accessToken = randomToken()
         const refreshToken = randomToken()
         const accessExpiresAt = issued + TTL.access
         const refreshExpiresAt = issued + TTL.refresh
         const scopesJson = JSON.stringify(scopes)
-        statements.saveToken.run(hashToken(accessToken), 'access', clientId, String(userId), scopesJson, resource ?? null, accessExpiresAt)
-        statements.saveToken.run(hashToken(refreshToken), 'refresh', clientId, String(userId), scopesJson, resource ?? null, refreshExpiresAt)
+        statements.saveToken.run(hashToken(accessToken), 'access', grantId, clientId, String(userId), scopesJson, resource ?? null, accessExpiresAt)
+        statements.saveToken.run(hashToken(refreshToken), 'refresh', grantId, clientId, String(userId), scopesJson, resource ?? null, refreshExpiresAt)
         return { accessToken, refreshToken, expiresIn: TTL.access, accessExpiresAt, refreshExpiresAt, scopes }
     }
 
@@ -242,33 +287,51 @@ export function createStore({ file, key, now = Date.now }) {
         },
 
         /**
-         * Issues an authorization code for a logged-in user.
+         * Issues an authorization code for a logged-in user; it starts a new
+         * grant.
          *
          * @param {{clientId: string, userId: string, params: AuthorizationRecord}} grant
          * @returns {string} the code
          */
         saveCode({ clientId, userId, params }) {
             const code = randomToken()
-            statements.saveCode.run(hashToken(code), clientId, String(userId), JSON.stringify(params), seconds() + TTL.code)
+            statements.saveCode.run(hashToken(code), randomUUID(), clientId, String(userId), JSON.stringify(params), seconds() + TTL.code)
             return code
         },
 
         /**
-         * Reads a code without using it up (the PKCE challenge lookup).
+         * Reads a code without using it up (the PKCE challenge lookup, which
+         * the token endpoint runs first). A code that was already used revokes
+         * every token issued from it, here already.
          *
          * @param {string} code
+         * @returns {object|null} null when unknown, expired or used
          */
         getCode(code) {
-            return codeRecord(live(statements.getCode.get(hashToken(code))))
+            const hash = hashToken(code)
+            const record = codeRecord(live(statements.getCode.get(hash)))
+            if (!record) revokeOnReplay(hash, 'code')
+            return record
         },
 
         /**
-         * Uses a code up: a second call with the same code returns null.
+         * Uses a code up: a second call with the same code returns null and
+         * revokes every token issued from the first.
          *
          * @param {string} code
+         * @returns {object|null} null when unknown, expired or used
          */
         takeCode(code) {
-            return codeRecord(live(statements.takeCode.get(hashToken(code))))
+            const hash = hashToken(code)
+            return transaction(() => {
+                const row = live(statements.takeCode.get(hash))
+                if (!row) {
+                    revokeOnReplay(hash, 'code')
+                    return null
+                }
+                bury(hash, 'code', row)
+                return codeRecord(row)
+            })
         },
 
         issueTokens,
@@ -285,8 +348,9 @@ export function createStore({ file, key, now = Date.now }) {
         },
 
         /**
-         * Exchanges a refresh token for a new pair; the old refresh token is
-         * gone afterwards, so a replay is refused.
+         * Exchanges a refresh token for a new pair of the same grant; the old
+         * refresh token is gone afterwards. Presenting it again is a replay:
+         * it is refused and revokes the grant's current pair.
          *
          * @param {string} refreshToken
          * @param {{clientId: string, scopes?: string[]}} request `scopes` may narrow, never widen, the grant
@@ -295,11 +359,17 @@ export function createStore({ file, key, now = Date.now }) {
         rotateRefreshToken(refreshToken, { clientId, scopes }) {
             return transaction(() => {
                 const hash = hashToken(refreshToken)
-                const record = tokenRecord(live(statements.getToken.get(hash)))
-                if (!record || record.kind !== 'refresh' || record.clientId !== clientId) return null
+                const row = live(statements.getToken.get(hash))
+                if (!row) {
+                    revokeOnReplay(hash, 'refresh')
+                    return null
+                }
+                const record = tokenRecord(row)
+                if (record.kind !== 'refresh' || record.clientId !== clientId) return null
                 if (scopes && !scopes.every((scope) => record.scopes.includes(scope))) return null
                 statements.deleteToken.run(hash)
-                return issueTokens({ clientId, userId: record.userId, scopes: scopes ?? record.scopes, resource: record.resource })
+                bury(hash, 'refresh', row)
+                return issueTokens({ clientId, userId: record.userId, scopes: scopes ?? record.scopes, resource: record.resource, grantId: row.grant_id })
             })
         },
 
@@ -352,7 +422,8 @@ export function createStore({ file, key, now = Date.now }) {
         },
 
         /**
-         * Deletes every expired pending authorization, code and token.
+         * Deletes every expired pending authorization, code, token and
+         * tombstone.
          *
          * @returns {number} how many rows went
          */

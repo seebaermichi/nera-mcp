@@ -14,8 +14,10 @@
 //            then exchangeAuthorizationCode() / exchangeRefreshToken()
 //
 // A code is bound to the client, its redirect URI, its PKCE challenge and its
-// resource, and is single use; refresh tokens rotate on every use. The GitHub
-// user token stays on the server — `githubToken(userId)` hands it to the tools
+// resource — always our own `/mcp`, the only one we issue tokens for — and is
+// single use; refresh tokens rotate on every use. A code or refresh token
+// presented a second time revokes every token of its grant (the store). The
+// GitHub user token stays on the server — `githubToken(userId)` hands it to the tools
 // and refreshes it when it is about to expire. No token is ever logged.
 import { timingSafeEqual } from 'node:crypto'
 import { InvalidGrantError, InvalidTargetError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
@@ -40,6 +42,18 @@ function sameToken(a, b) {
     return left.length === right.length && timingSafeEqual(left, right)
 }
 
+/**
+ * A resource URL as the `/mcp` guard (`requireBearerAuth`) compares it: the
+ * serialised value without its fragment and without one trailing slash.
+ *
+ * @param {string|URL} value
+ */
+function comparableResource(value) {
+    const url = new URL(value)
+    url.hash = ''
+    return url.href.replace(/\/$/, '')
+}
+
 /** The user has to sign in with GitHub again; the message says so. */
 export class SignInRequiredError extends Error {
     constructor(message) {
@@ -54,10 +68,13 @@ export class SignInRequiredError extends Error {
  * @param {object} options
  * @param {ReturnType<import('./store.js').createStore>} options.store
  * @param {ReturnType<import('./github.js').createGitHubClient>} options.github
+ * @param {string|URL} options.resource the protected resource we issue tokens for, `<issuer>/mcp`
  * @param {() => number} [options.now] the clock in milliseconds
  * @param {(message: string) => void} [options.log] where failures are reported (never with a token in them)
  */
-export function createProvider({ store, github, now = Date.now, log = () => {} }) {
+export function createProvider({ store, github, resource, now = Date.now, log = () => {} }) {
+    if (!resource) throw new Error('createProvider needs the protected resource it issues tokens for (<issuer>/mcp).')
+    const hostedResource = new URL(resource)
     const seconds = () => Math.floor(now() / 1000)
     /** In-flight GitHub refreshes per user: GitHub rotates the refresh token, so a second concurrent refresh would fail. */
     const refreshing = new Map()
@@ -110,7 +127,7 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
     }
 
     /** True when a requested resource names a different one than the grant's. */
-    const otherResource = (requested, granted) => requested !== undefined && granted !== undefined && requested.href !== new URL(granted).href
+    const otherResource = (requested, granted) => requested !== undefined && granted !== undefined && comparableResource(requested) !== comparableResource(granted)
 
     /**
      * The code's record when it belongs to this client and is still valid.
@@ -143,8 +160,16 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
          * Starts the login: remembers the client's request under a fresh state
          * and shows our consent page, bound to this browser by a cookie. Nobody
          * goes to GitHub before they approve (the confused-deputy guard).
+         *
+         * The request is bound to our `/mcp`: a missing `resource` means it, any
+         * other one is refused with `invalid_target` (the SDK redirects that to
+         * the client) before the consent page, since `/mcp` would refuse every
+         * token issued for it.
          */
         async authorize(client, params, res) {
+            if (params.resource && comparableResource(params.resource) !== comparableResource(hostedResource)) {
+                throw new InvalidTargetError(`This server issues tokens only for ${hostedResource.href}; the requested resource is another one.`)
+            }
             const { state, browserToken } = store.savePending({
                 clientId: client.client_id,
                 params: {
@@ -152,7 +177,7 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
                     redirectUri: params.redirectUri,
                     state: params.state,
                     scopes: params.scopes ?? [],
-                    resource: params.resource?.href,
+                    resource: hostedResource.href,
                 },
             })
             for (const [name, value] of Object.entries(CONSENT_HEADERS)) res.setHeader(name, value)
@@ -262,7 +287,8 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
 
         /**
          * Exchanges a code for our tokens. The code is used up first, so even
-         * a request that fails the checks below cannot try it again.
+         * a request that fails the checks below cannot try it again; a code
+         * presented again revokes the tokens of its first use (the store).
          */
         async exchangeAuthorizationCode(client, authorizationCode, _codeVerifier, redirectUri, resource) {
             const record = ownCode(store.takeCode(authorizationCode), client)
@@ -276,12 +302,16 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
                 clientId: client.client_id,
                 userId: record.userId,
                 scopes: record.scopes ?? [],
-                resource: record.resource ?? resource?.href,
+                resource: record.resource,
+                grantId: record.grantId,
             })
             return tokenResponse(tokens)
         },
 
-        /** Rotates a refresh token: the old one is refused from now on. */
+        /**
+         * Rotates a refresh token: the old one is refused from now on, and
+         * presenting it again revokes the grant's current pair (the store).
+         */
         async exchangeRefreshToken(client, refreshToken, scopes, resource) {
             const tokens = store.rotateRefreshToken(refreshToken, { clientId: client.client_id, scopes })
             if (!tokens) throw new InvalidGrantError('The refresh token is invalid, expired or was already used. Sign in again.')

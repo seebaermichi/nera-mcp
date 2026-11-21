@@ -189,8 +189,8 @@ describe('createStore', () => {
         expect(second.refreshToken).not.toBe(first.refreshToken)
         expect(second.scopes).toEqual(['mcp', 'read'])
         expect(store.getAccessToken(second.accessToken)).toMatchObject({ userId: '4242' })
-        expect(store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })).toBeNull()
         expect(store.rotateRefreshToken(second.refreshToken, { clientId: 'client-1', scopes: ['mcp'] }).scopes).toEqual(['mcp'])
+        expect(store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })).toBeNull()
     })
 
     it('refuses a refresh by another client, a widened scope, an access token or an expired token', () => {
@@ -200,6 +200,60 @@ describe('createStore', () => {
         expect(store.rotateRefreshToken(tokens.accessToken, { clientId: 'client-1' })).toBeNull()
         clock += TTL.refresh * 1000
         expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })).toBeNull()
+    })
+
+    it('revokes the tokens of a code\'s first use when the code comes again, also through the read-only lookup', () => {
+        for (const replay of ['takeCode', 'getCode']) {
+            const code = store.saveCode({ clientId: 'client-1', userId: 4242, params: PARAMS })
+            const { grantId } = store.takeCode(code)
+            const tokens = store.issueTokens({ clientId: 'client-1', userId: 4242, grantId })
+            const rotated = store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })
+            const bystander = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+
+            expect(store[replay](code)).toBeNull()
+            expect(store.getAccessToken(tokens.accessToken)).toBeNull()
+            expect(store.getAccessToken(rotated.accessToken)).toBeNull()
+            expect(store.rotateRefreshToken(rotated.refreshToken, { clientId: 'client-1' })).toBeNull()
+            expect(store.getAccessToken(bystander.accessToken)).not.toBeNull()
+        }
+    })
+
+    it('gives every code its own grant', () => {
+        const first = store.takeCode(store.saveCode({ clientId: 'client-1', userId: 1, params: PARAMS }))
+        const second = store.takeCode(store.saveCode({ clientId: 'client-1', userId: 1, params: PARAMS }))
+        expect(first.grantId).toEqual(expect.any(String))
+        expect(second.grantId).not.toBe(first.grantId)
+    })
+
+    it('revokes the current pair when an already rotated refresh token comes again', () => {
+        const first = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+        const second = store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })
+        const third = store.rotateRefreshToken(second.refreshToken, { clientId: 'client-1' })
+        const bystander = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+
+        expect(store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })).toBeNull()
+        expect(store.getAccessToken(third.accessToken)).toBeNull()
+        expect(store.rotateRefreshToken(third.refreshToken, { clientId: 'client-1' })).toBeNull()
+        expect(store.rotateRefreshToken(bystander.refreshToken, { clientId: 'client-1' })).not.toBeNull()
+    })
+
+    it('never takes a legitimate rotation chain for a replay', () => {
+        let tokens = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+        for (let round = 0; round < 5; round += 1) {
+            clock += TTL.access * 1000
+            tokens = store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })
+            expect(tokens).not.toBeNull()
+            expect(store.getAccessToken(tokens.accessToken)).not.toBeNull()
+        }
+    })
+
+    it('does not revoke on a refused refresh that never rotated: another client, a widened scope, an access token', () => {
+        const tokens = store.issueTokens({ clientId: 'client-1', userId: 1, scopes: ['mcp'] })
+        expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-2' })).toBeNull()
+        expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1', scopes: ['admin'] })).toBeNull()
+        expect(store.rotateRefreshToken(tokens.accessToken, { clientId: 'client-1' })).toBeNull()
+        expect(store.getAccessToken(tokens.accessToken)).not.toBeNull()
+        expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })).not.toBeNull()
     })
 
     it('revokes a token of the same client only', () => {
@@ -232,12 +286,18 @@ describe('createStore', () => {
         store.saveGithubUser(GITHUB_USER)
         const { state, browserToken } = store.savePending({ clientId: 'client-1', params: PARAMS })
         const code = store.saveCode({ clientId: 'client-1', userId: 4242, params: PARAMS })
+        const usedCode = store.saveCode({ clientId: 'client-1', userId: 4242, params: PARAMS })
+        store.takeCode(usedCode)
         const tokens = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+        const rotated = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+        store.rotateRefreshToken(rotated.refreshToken, { clientId: 'client-1' })
         store.close()
         const bytes = databaseBytes()
         expect(bytes).toContain('octo')
         expect(bytes).toContain(hashToken(tokens.accessToken))
-        for (const secret of [GITHUB_USER.accessToken, GITHUB_USER.refreshToken, state, browserToken, code, tokens.accessToken, tokens.refreshToken]) {
+        expect(bytes).toContain(hashToken(usedCode))
+        expect(bytes).toContain(hashToken(rotated.refreshToken))
+        for (const secret of [GITHUB_USER.accessToken, GITHUB_USER.refreshToken, state, browserToken, code, usedCode, tokens.accessToken, tokens.refreshToken, rotated.refreshToken]) {
             expect(bytes).not.toContain(secret)
         }
     })
@@ -256,9 +316,23 @@ describe('createStore', () => {
         expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })).not.toBeNull()
         store.close()
         expect(countRows('tokens')).toBe(2)
+        expect(countRows('tombstones')).toBe(1)
         clock += TTL.refresh * 1000
         store = createStore({ file, key: KEY, now })
         store.close()
         expect(countRows('tokens')).toBe(0)
+        expect(countRows('tombstones')).toBe(0)
+    })
+
+    it('keeps a tombstone only as long as the code or token would have lived', () => {
+        store.takeCode(store.saveCode({ clientId: 'client-1', userId: 1, params: PARAMS }))
+        const tokens = store.issueTokens({ clientId: 'client-1', userId: 1 })
+        store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })
+        expect(store.purgeExpired()).toBe(0)
+        clock += TTL.code * 1000
+        expect(store.purgeExpired()).toBe(1)
+        clock += TTL.refresh * 1000
+        // the first pair's access token, the rotated pair, the refresh token's tombstone
+        expect(store.purgeExpired()).toBe(4)
     })
 })
