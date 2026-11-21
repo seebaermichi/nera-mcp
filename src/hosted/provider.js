@@ -3,9 +3,13 @@
 // store. We are the authorization server for claude.ai and ChatGPT (they
 // register via DCR), and delegate the login itself to GitHub:
 //
-//   client → /authorize → authorize() saves the request, redirects to GitHub
-//   GitHub → /oauth/github/callback → handleGitHubCallback() saves the GitHub
-//            user, issues our code, redirects to the client with its `state`
+//   client → /authorize → authorize() saves the request, shows our consent
+//            page (src/hosted/consent.js) and sets the browser cookie
+//   user   → POST /oauth/consent → handleConsent(): Approve redirects to
+//            GitHub, Deny back to the client with `access_denied`
+//   GitHub → /oauth/github/callback → handleGitHubCallback() takes only an
+//            approved request of the same browser, saves the GitHub user,
+//            issues our code, redirects to the client with its `state`
 //   client → /token → challengeForAuthorizationCode() (the SDK checks PKCE),
 //            then exchangeAuthorizationCode() / exchangeRefreshToken()
 //
@@ -13,13 +17,28 @@
 // resource, and is single use; refresh tokens rotate on every use. The GitHub
 // user token stays on the server — `githubToken(userId)` hands it to the tools
 // and refreshes it when it is about to expire. No token is ever logged.
+import { timingSafeEqual } from 'node:crypto'
 import { InvalidGrantError, InvalidTargetError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
+import { CONSENT_HEADERS, consentCookie, readConsentCookie, renderConsentPage } from './consent.js'
+import { TTL } from './store.js'
 
 /** Refresh the GitHub token this many seconds before it expires. */
 const GITHUB_REFRESH_MARGIN = 5 * 60
 
 /** Shown when the GitHub callback cannot be tied to a client's request. */
 const EXPIRED_SIGN_IN = 'This sign-in link has expired or was already used. Start the connection again from your AI assistant.'
+
+/** Shown when a consent POST does not come from the page this browser was shown. */
+const FOREIGN_CONSENT = 'This approval did not come from the consent page shown in this browser, so it was refused. Start the connection again from your AI assistant.'
+
+/** True for two equal non-empty strings, compared in constant time. */
+function sameToken(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string' || !a) return false
+    // Compare byte lengths: a non-ASCII field of the same string length would make timingSafeEqual throw.
+    const left = Buffer.from(a)
+    const right = Buffer.from(b)
+    return left.length === right.length && timingSafeEqual(left, right)
+}
 
 /** The user has to sign in with GitHub again; the message says so. */
 export class SignInRequiredError extends Error {
@@ -58,11 +77,25 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
      * @param {Record<string, string|undefined>} params
      */
     function redirectToClient(res, redirectUri, params) {
+        res.setHeader('Set-Cookie', consentCookie('', 0))
         const url = new URL(redirectUri)
         for (const [name, value] of Object.entries(params)) {
             if (value !== undefined) url.searchParams.set(name, value)
         }
         res.redirect(302, url.href)
+    }
+
+    /**
+     * An error page of the consent flow, uncached and unframeable.
+     *
+     * @param {import('express').Response} res
+     * @param {number} status
+     * @param {string} message
+     */
+    function errorPage(res, status, message) {
+        for (const [name, value] of Object.entries(CONSENT_HEADERS)) res.setHeader(name, value)
+        res.setHeader('Set-Cookie', consentCookie('', 0))
+        res.status(status).type('text/plain').send(message)
     }
 
     /** Our token response (RFC 6749 §5.1) for a pair from the store. */
@@ -108,10 +141,11 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
 
         /**
          * Starts the login: remembers the client's request under a fresh state
-         * and sends the user to GitHub with it.
+         * and shows our consent page, bound to this browser by a cookie. Nobody
+         * goes to GitHub before they approve (the confused-deputy guard).
          */
         async authorize(client, params, res) {
-            const state = store.savePending({
+            const { state, browserToken } = store.savePending({
                 clientId: client.client_id,
                 params: {
                     codeChallenge: params.codeChallenge,
@@ -121,23 +155,76 @@ export function createProvider({ store, github, now = Date.now, log = () => {} }
                     resource: params.resource?.href,
                 },
             })
+            for (const [name, value] of Object.entries(CONSENT_HEADERS)) res.setHeader(name, value)
+            res.setHeader('Set-Cookie', consentCookie(browserToken, TTL.pending))
+            res.status(200).type('html').send(renderConsentPage({
+                clientName: client.client_name,
+                clientId: client.client_id,
+                redirectUri: params.redirectUri,
+                state,
+                csrfToken: browserToken,
+            }))
+        },
+
+        /**
+         * The consent form's POST (`/oauth/consent`, urlencoded body). The
+         * form's `csrf_token` must equal this browser's consent cookie, and the
+         * cookie must be the one the state was issued to — a page opened in an
+         * attacker's browser cannot be approved from the victim's. Approve
+         * redirects to GitHub, Deny to the client with `access_denied`.
+         *
+         * @param {{body?: Record<string, unknown>, headers?: Record<string, unknown>}} req
+         * @param {import('express').Response} res
+         */
+        async handleConsent(req, res) {
+            const field = (name) => (typeof req.body?.[name] === 'string' ? req.body[name] : undefined)
+            const browserToken = readConsentCookie(req.headers?.cookie)
+            const state = field('state')
+            if (!state) {
+                errorPage(res, 400, EXPIRED_SIGN_IN)
+                return
+            }
+            if (!sameToken(field('csrf_token'), browserToken)) {
+                errorPage(res, 403, FOREIGN_CONSENT)
+                return
+            }
+            const decision = field('decision')
+            if (decision === 'deny') {
+                const pending = store.takePending(state, browserToken)
+                if (!pending) {
+                    errorPage(res, 400, EXPIRED_SIGN_IN)
+                    return
+                }
+                redirectToClient(res, pending.params.redirectUri, { error: 'access_denied', error_description: 'The connection was denied on the consent page.', state: pending.params.state })
+                return
+            }
+            if (decision !== 'approve') {
+                errorPage(res, 400, 'The consent form was sent without Approve or Deny. Start the connection again from your AI assistant.')
+                return
+            }
+            if (!store.approvePending(state, browserToken)) {
+                errorPage(res, 400, EXPIRED_SIGN_IN)
+                return
+            }
             res.redirect(302, github.authorizeUrl(state))
         },
 
         /**
          * GitHub's redirect back to us (`/oauth/github/callback`). Ends with a
          * redirect to the client — our code and its `state`, or an OAuth error —
-         * or, when the state is unknown (we cannot know where to send the user),
-         * a 400 page that says what to do.
+         * or, when the state is unknown, was never approved or was approved in
+         * another browser (we cannot know where to send the user safely), a 400
+         * page that says what to do.
          *
-         * @param {Record<string, unknown>} query the callback's query parameters
+         * @param {{query?: Record<string, unknown>, headers?: Record<string, unknown>}} req
          * @param {import('express').Response} res
          */
-        async handleGitHubCallback(query, res) {
-            const text = (name) => (typeof query?.[name] === 'string' ? query[name] : undefined)
-            const pending = text('state') ? store.takePending(text('state')) : null
-            if (!pending) {
-                res.status(400).type('text/plain').send(EXPIRED_SIGN_IN)
+        async handleGitHubCallback(req, res) {
+            const text = (name) => (typeof req.query?.[name] === 'string' ? req.query[name] : undefined)
+            const browserToken = readConsentCookie(req.headers?.cookie)
+            const pending = text('state') ? store.takePending(text('state'), browserToken) : null
+            if (!pending?.approved) {
+                errorPage(res, 400, EXPIRED_SIGN_IN)
                 return
             }
             const { clientId, params } = pending

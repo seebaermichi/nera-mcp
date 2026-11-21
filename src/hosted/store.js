@@ -1,13 +1,15 @@
 // The hosted mode's persistent state (L7b), one SQLite file via `node:sqlite`:
-// registered OAuth clients, pending authorizations (between our `/authorize`
-// and GitHub's callback), authorization codes, our access and refresh tokens,
-// and the GitHub users with their tokens.
+// registered OAuth clients, pending authorizations (from our `/authorize`
+// through the consent page to GitHub's callback), authorization codes, our
+// access and refresh tokens, and the GitHub users with their tokens.
 //
-// What reaches the file: our codes, tokens and the GitHub `state` only as
-// SHA-256 hashes (they are looked up, never read back); GitHub's tokens and a
-// client's secret AES-256-GCM-encrypted (they must be read back). Only the
+// What reaches the file: our codes, tokens, the GitHub `state` and the consent
+// page's browser token only as SHA-256 hashes (they are looked up, never read
+// back); GitHub's tokens and a client's secret AES-256-GCM-encrypted (they
+// must be read back). Only the
 // hosted mode loads this module — `node:sqlite` needs Node >= 22.13, while the
 // stdio server (`src/server.js`) stays on the package's 22.12 floor.
+import { timingSafeEqual } from 'node:crypto'
 import { chmodSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { decrypt, encrypt, hashToken, parseKey, randomToken } from './crypto.js'
@@ -30,6 +32,8 @@ CREATE TABLE IF NOT EXISTS pending (
     state_hash TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
     params TEXT NOT NULL,
+    browser_hash TEXT NOT NULL,
+    approved INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS codes (
@@ -94,8 +98,10 @@ export function createStore({ file, key, now = Date.now }) {
     const statements = {
         getClient: db.prepare('SELECT info, secret FROM clients WHERE client_id = ?'),
         saveClient: db.prepare('INSERT OR REPLACE INTO clients (client_id, info, secret) VALUES (?, ?, ?)'),
-        savePending: db.prepare('INSERT INTO pending (state_hash, client_id, params, expires_at) VALUES (?, ?, ?, ?)'),
-        takePending: db.prepare('DELETE FROM pending WHERE state_hash = ? RETURNING client_id, params, expires_at'),
+        savePending: db.prepare('INSERT INTO pending (state_hash, client_id, params, browser_hash, expires_at) VALUES (?, ?, ?, ?, ?)'),
+        getPending: db.prepare('SELECT client_id, params, browser_hash, approved, expires_at FROM pending WHERE state_hash = ?'),
+        approvePending: db.prepare('UPDATE pending SET approved = 1 WHERE state_hash = ? AND approved = 0'),
+        takePending: db.prepare('DELETE FROM pending WHERE state_hash = ? RETURNING client_id, params, browser_hash, approved, expires_at'),
         saveCode: db.prepare('INSERT INTO codes (code_hash, client_id, user_id, params, expires_at) VALUES (?, ?, ?, ?, ?)'),
         getCode: db.prepare('SELECT client_id, user_id, params, expires_at FROM codes WHERE code_hash = ?'),
         takeCode: db.prepare('DELETE FROM codes WHERE code_hash = ? RETURNING client_id, user_id, params, expires_at'),
@@ -111,6 +117,14 @@ export function createStore({ file, key, now = Date.now }) {
     }
 
     const live = (row) => (row && row.expires_at > seconds() ? row : null)
+    /** True when the browser token hashes to the one stored with the pending row. */
+    const sameBrowser = (row, browserToken) => typeof browserToken === 'string' && timingSafeEqual(Buffer.from(hashToken(browserToken)), Buffer.from(row.browser_hash))
+    /** A live pending row of this browser as a record, else null. */
+    const pendingRecord = (row, browserToken) => {
+        const own = live(row)
+        if (!own || !sameBrowser(own, browserToken)) return null
+        return { clientId: own.client_id, params: JSON.parse(own.params), approved: own.approved === 1 }
+    }
     const codeRecord = (row) => row && { clientId: row.client_id, userId: row.user_id, ...JSON.parse(row.params), expiresAt: row.expires_at }
     const tokenRecord = (row) => row && {
         kind: row.kind,
@@ -174,27 +188,57 @@ export function createStore({ file, key, now = Date.now }) {
         },
 
         /**
-         * Remembers a client's authorization request while the user logs in at
-         * GitHub.
+         * Remembers a client's authorization request while the user decides on
+         * the consent page and logs in at GitHub. It is bound to the browser
+         * that holds `browserToken` (the consent cookie).
          *
          * @param {{clientId: string, params: AuthorizationRecord}} pending
-         * @returns {string} the `state` to send to GitHub
+         * @returns {{state: string, browserToken: string}} the `state` for the consent form and GitHub, the token for the cookie
          */
         savePending({ clientId, params }) {
             const state = randomToken()
-            statements.savePending.run(hashToken(state), clientId, JSON.stringify(params), seconds() + TTL.pending)
-            return state
+            const browserToken = randomToken()
+            statements.savePending.run(hashToken(state), clientId, JSON.stringify(params), hashToken(browserToken), seconds() + TTL.pending)
+            return { state, browserToken }
         },
 
         /**
-         * Takes the pending request back on GitHub's callback; single use.
+         * Reads a pending request without using it up.
          *
          * @param {string} state
-         * @returns {{clientId: string, params: AuthorizationRecord}|null} null when unknown, used or expired
+         * @param {string} browserToken
+         * @returns {{clientId: string, params: AuthorizationRecord, approved: boolean}|null} null when unknown, expired or another browser's
          */
-        takePending(state) {
-            const row = live(statements.takePending.get(hashToken(state)))
-            return row && { clientId: row.client_id, params: JSON.parse(row.params) }
+        getPending(state, browserToken) {
+            return pendingRecord(statements.getPending.get(hashToken(state)), browserToken)
+        },
+
+        /**
+         * Records the user's Approve; once only.
+         *
+         * @param {string} state
+         * @param {string} browserToken
+         * @returns {boolean} false when unknown, expired, another browser's or already approved
+         */
+        approvePending(state, browserToken) {
+            return transaction(() => {
+                const record = pendingRecord(statements.getPending.get(hashToken(state)), browserToken)
+                if (!record || record.approved) return false
+                return statements.approvePending.run(hashToken(state)).changes > 0
+            })
+        },
+
+        /**
+         * Takes the pending request back (GitHub's callback, or a Deny); single
+         * use — the row is gone afterwards even when it belongs to another
+         * browser, so a wrong guess cannot be retried.
+         *
+         * @param {string} state
+         * @param {string} browserToken
+         * @returns {{clientId: string, params: AuthorizationRecord, approved: boolean}|null} null when unknown, used, expired or another browser's
+         */
+        takePending(state, browserToken) {
+            return pendingRecord(statements.takePending.get(hashToken(state)), browserToken)
         },
 
         /**

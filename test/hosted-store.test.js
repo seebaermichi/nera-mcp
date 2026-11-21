@@ -115,17 +115,39 @@ describe('createStore', () => {
         expect(store.getClient('public')).not.toHaveProperty('client_secret')
     })
 
-    it('hands a pending authorization back once, by the state sent to GitHub', () => {
-        const state = store.savePending({ clientId: 'client-1', params: PARAMS })
-        expect(store.takePending(state)).toEqual({ clientId: 'client-1', params: PARAMS })
-        expect(store.takePending(state)).toBeNull()
-        expect(store.takePending('forged')).toBeNull()
+    it('hands a pending authorization back once, by its state and to its own browser', () => {
+        const { state, browserToken } = store.savePending({ clientId: 'client-1', params: PARAMS })
+        expect(browserToken).not.toBe(state)
+        expect(store.takePending('forged', browserToken)).toBeNull()
+        expect(store.takePending(state, browserToken)).toEqual({ clientId: 'client-1', params: PARAMS, approved: false })
+        expect(store.takePending(state, browserToken)).toBeNull()
+    })
+
+    it('records Approve once, for the browser the pending authorization was issued to', () => {
+        const { state, browserToken } = store.savePending({ clientId: 'client-1', params: PARAMS })
+        expect(store.approvePending(state, 'another-browser')).toBe(false)
+        expect(store.approvePending(state, undefined)).toBe(false)
+        expect(store.getPending(state, browserToken)).toMatchObject({ approved: false })
+        expect(store.approvePending(state, browserToken)).toBe(true)
+        expect(store.approvePending(state, browserToken)).toBe(false)
+        expect(store.getPending(state, 'another-browser')).toBeNull()
+        expect(store.getPending(state, browserToken)).toEqual({ clientId: 'client-1', params: PARAMS, approved: true })
+        expect(store.takePending(state, browserToken)).toMatchObject({ approved: true })
+    })
+
+    it('uses a pending authorization up even when another browser takes it', () => {
+        const { state, browserToken } = store.savePending({ clientId: 'client-1', params: PARAMS })
+        store.approvePending(state, browserToken)
+        expect(store.takePending(state, 'another-browser')).toBeNull()
+        expect(store.takePending(state, browserToken)).toBeNull()
     })
 
     it('lets a pending authorization expire', () => {
-        const state = store.savePending({ clientId: 'client-1', params: PARAMS })
+        const { state, browserToken } = store.savePending({ clientId: 'client-1', params: PARAMS })
         clock += TTL.pending * 1000
-        expect(store.takePending(state)).toBeNull()
+        expect(store.approvePending(state, browserToken)).toBe(false)
+        expect(store.getPending(state, browserToken)).toBeNull()
+        expect(store.takePending(state, browserToken)).toBeNull()
     })
 
     it('reads a code without using it up, then uses it up once', () => {
@@ -208,14 +230,14 @@ describe('createStore', () => {
 
     it('writes no plaintext token, code or state into the database file', () => {
         store.saveGithubUser(GITHUB_USER)
-        const state = store.savePending({ clientId: 'client-1', params: PARAMS })
+        const { state, browserToken } = store.savePending({ clientId: 'client-1', params: PARAMS })
         const code = store.saveCode({ clientId: 'client-1', userId: 4242, params: PARAMS })
         const tokens = store.issueTokens({ clientId: 'client-1', userId: 4242 })
         store.close()
         const bytes = databaseBytes()
         expect(bytes).toContain('octo')
         expect(bytes).toContain(hashToken(tokens.accessToken))
-        for (const secret of [GITHUB_USER.accessToken, GITHUB_USER.refreshToken, state, code, tokens.accessToken, tokens.refreshToken]) {
+        for (const secret of [GITHUB_USER.accessToken, GITHUB_USER.refreshToken, state, browserToken, code, tokens.accessToken, tokens.refreshToken]) {
             expect(bytes).not.toContain(secret)
         }
     })

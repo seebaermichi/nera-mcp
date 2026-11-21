@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { CONSENT_COOKIE } from '../src/hosted/consent.js'
 import { createGitHubClient, GitHubError } from '../src/hosted/github.js'
 import { createProvider, SignInRequiredError } from '../src/hosted/provider.js'
 import { createStore, TTL } from '../src/hosted/store.js'
@@ -47,6 +48,11 @@ function fakeGitHub() {
 function fakeResponse() {
     const res = {
         statusCode: 200,
+        headers: {},
+        setHeader(name, value) {
+            res.headers[name.toLowerCase()] = value
+            return res
+        },
         status(code) {
             res.statusCode = code
             return res
@@ -99,18 +105,57 @@ afterEach(() => {
     store.close()
 })
 
-/** Runs `/authorize` and returns the state it sent to GitHub. */
-async function startSignIn(params = AUTH_PARAMS) {
+/** The browser-binding token a response's `Set-Cookie` sets, or '' when it deletes it. */
+function cookieToken(res) {
+    const match = new RegExp(`^${CONSENT_COOKIE}=([^;]*);`).exec(res.headers['set-cookie'] ?? '')
+    return match ? match[1] : undefined
+}
+
+/** A hidden form field of the consent page. */
+function formField(html, name) {
+    return new RegExp(`name="${name}" value="([^"]*)"`).exec(html)?.[1]
+}
+
+/**
+ * Runs `/authorize` in one browser: returns the consent page and what that
+ * browser now holds (its cookie header) and would post (state, csrf_token).
+ */
+async function openConsent(client = CLIENT, params = AUTH_PARAMS) {
     const res = fakeResponse()
-    await provider.authorize(CLIENT, params, res)
-    return new URL(res.location).searchParams.get('state')
+    await provider.authorize(client, params, res)
+    return {
+        res,
+        state: formField(res.body, 'state'),
+        csrf: formField(res.body, 'csrf_token'),
+        cookie: `other=1; ${CONSENT_COOKIE}=${cookieToken(res)}`,
+    }
+}
+
+/** POSTs the consent form. */
+async function consent({ state, csrf, cookie, decision = 'approve' }) {
+    const res = fakeResponse()
+    await provider.handleConsent({ body: { state, csrf_token: csrf, decision }, headers: { cookie } }, res)
+    return res
+}
+
+/** GitHub's redirect back to our callback, in a browser holding `cookie`. */
+async function callback(query, cookie) {
+    const res = fakeResponse()
+    await provider.handleGitHubCallback({ query, headers: { cookie } }, res)
+    return res
+}
+
+/** Runs `/authorize` and Approve; returns the state sent to GitHub and the browser's cookie. */
+async function startSignIn(params = AUTH_PARAMS) {
+    const page = await openConsent(CLIENT, params)
+    const res = await consent(page)
+    return { state: new URL(res.location).searchParams.get('state'), cookie: page.cookie }
 }
 
 /** Runs the whole login and returns the code the client receives. */
 async function signIn(params = AUTH_PARAMS) {
-    const state = await startSignIn(params)
-    const res = fakeResponse()
-    await provider.handleGitHubCallback({ code: 'gh-code', state }, res)
+    const { state, cookie } = await startSignIn(params)
+    const res = await callback({ code: 'gh-code', state }, cookie)
     return new URL(res.location).searchParams.get('code')
 }
 
@@ -178,56 +223,176 @@ describe('clients store', () => {
     })
 })
 
-describe('authorize and the GitHub callback', () => {
-    it('sends the user to GitHub with our own state, not the client\'s', async () => {
-        const res = fakeResponse()
-        await provider.authorize(CLIENT, AUTH_PARAMS, res)
-        expect(res.statusCode).toBe(302)
-        const url = new URL(res.location)
-        expect(url.origin).toBe('https://github.example')
-        expect(url.searchParams.get('state')).not.toBe('client-state')
-        expect(url.searchParams.get('state').length).toBeGreaterThan(30)
+describe('consent page', () => {
+    it('shows our consent page instead of sending the user to GitHub', async () => {
+        const { res, state, csrf } = await openConsent()
+        expect(res.statusCode).toBe(200)
+        expect(res.location).toBeUndefined()
+        expect(res.contentType).toBe('html')
+        expect(res.body).toContain('<span class="client">Claude</span>')
+        expect(res.body).toContain('<span class="host">claude.ai</span>')
+        expect(res.body).toMatch(/<form method="post" action="\/oauth\/consent">/)
+        expect(state).not.toBe('client-state')
+        expect(state.length).toBeGreaterThan(30)
+        expect(csrf).toBe(cookieToken(res))
+        expect(gh.requests).toEqual([])
     })
 
+    it('binds the page to the browser with a __Host- cookie and forbids framing and caching', async () => {
+        const { res } = await openConsent()
+        expect(res.headers['set-cookie']).toMatch(new RegExp(`^${CONSENT_COOKIE}=[\\w-]{40,}; Max-Age=${TTL.pending}; Path=/; Secure; HttpOnly; SameSite=Lax$`))
+        expect(res.headers['x-frame-options']).toBe('DENY')
+        expect(res.headers['content-security-policy']).toMatch(/default-src 'none'/)
+        expect(res.headers['content-security-policy']).toMatch(/frame-ancestors 'none'/)
+        expect(res.headers['content-security-policy']).toMatch(/style-src 'sha256-[\w+/=]+'/)
+        expect(res.headers['cache-control']).toBe('no-store')
+    })
+
+    it('escapes a client_name with markup and names a nameless client by its id', async () => {
+        const evil = { ...CLIENT, client_id: 'client-evil', client_name: '<script>alert("x")</script><b>Claude</b>' }
+        store.saveClient(evil)
+        const { res } = await openConsent(evil)
+        expect(res.body).not.toContain('<script>alert')
+        expect(res.body).not.toContain('<b>Claude</b>')
+        expect(res.body).toContain('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;&lt;b&gt;Claude&lt;/b&gt;')
+
+        const nameless = await openConsent(OTHER_CLIENT, { ...AUTH_PARAMS, redirectUri: OTHER_CLIENT.redirect_uris[0] })
+        expect(nameless.res.body).toContain('An application without a name (client-b)')
+        expect(nameless.res.body).toContain('<span class="host">chatgpt.com</span>')
+    })
+
+    it('sends only Approve on to GitHub, with our state, and only once', async () => {
+        const page = await openConsent()
+        const approved = await consent(page)
+        expect(approved.statusCode).toBe(302)
+        const url = new URL(approved.location)
+        expect(url.origin + url.pathname).toBe('https://github.example/login/oauth/authorize')
+        expect(url.searchParams.get('state')).toBe(page.state)
+        expect(approved.headers['set-cookie']).toBeUndefined()
+
+        const again = await consent(page)
+        expect(again.statusCode).toBe(400)
+        expect(again.location).toBeUndefined()
+    })
+
+    it('refuses a POST whose csrf_token is missing, wrong or not this browser\'s cookie', async () => {
+        const page = await openConsent()
+        for (const forged of [
+            { ...page, csrf: undefined },
+            { ...page, csrf: 'guessed' },
+            { ...page, cookie: undefined },
+            { ...page, cookie: `${CONSENT_COOKIE}=guessed`, csrf: 'guessed' },
+            // Same string length as the cookie, more bytes: refused, not a thrown RangeError.
+            { ...page, csrf: `é${page.csrf.slice(1)}` },
+        ]) {
+            const res = await consent(forged)
+            expect(res.statusCode, JSON.stringify(forged)).toBeGreaterThanOrEqual(400)
+            expect(res.location).toBeUndefined()
+        }
+        expect((await consent(page)).statusCode).toBe(302)
+    })
+
+    it('refuses a cross-site POST built from a consent page the attacker opened in their own browser', async () => {
+        const attackers = await openConsent()
+        const victims = await openConsent()
+        // The forged form carries the attacker's state and csrf_token; the
+        // victim's browser sends its own cookie, or none at all.
+        for (const cookie of [victims.cookie, undefined]) {
+            const res = await consent({ state: attackers.state, csrf: attackers.csrf, cookie })
+            expect(res.statusCode).toBe(403)
+            expect(res.body).toMatch(/did not come from the consent page/)
+        }
+        // A matching pair of the victim's cookie and csrf_token still does not approve the attacker's state.
+        const res = await consent({ state: attackers.state, csrf: victims.csrf, cookie: victims.cookie })
+        expect(res.statusCode).toBe(400)
+        expect(store.getPending(attackers.state, cookieToken(attackers.res))).toMatchObject({ approved: false })
+    })
+
+    it('refuses an unknown or expired state and a missing decision', async () => {
+        const page = await openConsent()
+        expect((await consent({ ...page, state: 'made-up' })).statusCode).toBe(400)
+        expect((await consent({ ...page, state: undefined })).statusCode).toBe(400)
+        expect((await consent({ ...page, decision: 'maybe' })).statusCode).toBe(400)
+        clock += (TTL.pending + 1) * 1000
+        const expired = await consent(page)
+        expect(expired.statusCode).toBe(400)
+        expect(expired.body).toMatch(/Start the connection again/)
+        expect(expired.headers['set-cookie']).toMatch(/Max-Age=0/)
+    })
+
+    it('answers Deny with access_denied and the client\'s state, and forgets the request', async () => {
+        const page = await openConsent()
+        const res = await consent({ ...page, decision: 'deny' })
+        expect(res.statusCode).toBe(302)
+        const url = new URL(res.location)
+        expect(url.origin + url.pathname).toBe(AUTH_PARAMS.redirectUri)
+        expect(url.searchParams.get('error')).toBe('access_denied')
+        expect(url.searchParams.get('state')).toBe('client-state')
+        expect(url.searchParams.get('code')).toBeNull()
+        expect(res.headers['set-cookie']).toMatch(/Max-Age=0/)
+        expect((await consent(page)).statusCode).toBe(400)
+        expect((await callback({ code: 'gh-code', state: page.state }, page.cookie)).statusCode).toBe(400)
+        expect(gh.requests).toEqual([])
+    })
+})
+
+describe('the GitHub callback', () => {
     it('returns our code and the client\'s state to the client\'s redirect URI', async () => {
-        const state = await startSignIn()
-        const res = fakeResponse()
-        await provider.handleGitHubCallback({ code: 'gh-code', state }, res)
+        const { state, cookie } = await startSignIn()
+        const res = await callback({ code: 'gh-code', state }, cookie)
         const url = new URL(res.location)
         expect(res.statusCode).toBe(302)
         expect(url.origin + url.pathname).toBe(AUTH_PARAMS.redirectUri)
         expect(url.searchParams.get('state')).toBe('client-state')
         expect(url.searchParams.get('code')).toMatch(/^[\w-]{40,}$/)
+        expect(res.headers['set-cookie']).toMatch(/Max-Age=0/)
         expect(store.getGithubUser('4242')).toMatchObject({ login: 'octo', accessToken: 'ghu_access1', refreshToken: 'ghr_refresh1' })
     })
 
+    it('refuses a state nobody approved, without calling GitHub', async () => {
+        const page = await openConsent()
+        const res = await callback({ code: 'gh-code', state: page.state }, page.cookie)
+        expect(res.statusCode).toBe(400)
+        expect(res.location).toBeUndefined()
+        expect(gh.requests).toEqual([])
+        // The request is used up: approving it afterwards does not revive it.
+        expect((await consent(page)).statusCode).toBe(400)
+    })
+
+    it('refuses a state approved in another browser, without calling GitHub', async () => {
+        // The attacker approves their own request, then lures the victim
+        // through GitHub with its state; the victim's browser lacks the cookie.
+        const attackers = await startSignIn()
+        const victims = await openConsent()
+        for (const cookie of [victims.cookie, undefined]) {
+            const res = await callback({ code: 'victim-gh-code', state: attackers.state }, cookie)
+            expect(res.statusCode).toBe(400)
+        }
+        expect(gh.requests).toEqual([])
+    })
+
     it('answers an unknown, reused or expired state with a 400 that says what to do', async () => {
-        const unknown = fakeResponse()
-        await provider.handleGitHubCallback({ code: 'gh-code', state: 'made-up' }, unknown)
+        const unknown = await callback({ code: 'gh-code', state: 'made-up' })
         expect(unknown.statusCode).toBe(400)
         expect(unknown.body).toMatch(/Start the connection again/)
 
-        const state = await startSignIn()
-        await provider.handleGitHubCallback({ code: 'gh-code', state }, fakeResponse())
-        const reused = fakeResponse()
-        await provider.handleGitHubCallback({ code: 'gh-code', state }, reused)
-        expect(reused.statusCode).toBe(400)
+        const { state, cookie } = await startSignIn()
+        await callback({ code: 'gh-code', state }, cookie)
+        expect((await callback({ code: 'gh-code', state }, cookie)).statusCode).toBe(400)
 
         const late = await startSignIn()
         clock += (TTL.pending + 1) * 1000
-        const expired = fakeResponse()
-        await provider.handleGitHubCallback({ code: 'gh-code', state: late }, expired)
-        expect(expired.statusCode).toBe(400)
+        expect((await callback({ code: 'gh-code', state: late.state }, late.cookie)).statusCode).toBe(400)
 
-        const missing = fakeResponse()
-        await provider.handleGitHubCallback({}, missing)
-        expect(missing.statusCode).toBe(400)
+        expect((await callback({})).statusCode).toBe(400)
+        const noRequest = fakeResponse()
+        await provider.handleGitHubCallback({}, noRequest)
+        expect(noRequest.statusCode).toBe(400)
     })
 
     it('passes a GitHub denial on to the client as access_denied with its state', async () => {
-        const state = await startSignIn()
-        const res = fakeResponse()
-        await provider.handleGitHubCallback({ error: 'access_denied', error_description: 'The user has denied your application access.', state }, res)
+        const { state, cookie } = await startSignIn()
+        const res = await callback({ error: 'access_denied', error_description: 'The user has denied your application access.', state }, cookie)
         const url = new URL(res.location)
         expect(url.origin + url.pathname).toBe(AUTH_PARAMS.redirectUri)
         expect(url.searchParams.get('error')).toBe('access_denied')
@@ -238,9 +403,8 @@ describe('authorize and the GitHub callback', () => {
 
     it('reports a failed GitHub exchange as server_error and logs no secret', async () => {
         gh.tokenAnswer = { status: 200, body: { error: 'bad_verification_code' } }
-        const state = await startSignIn()
-        const res = fakeResponse()
-        await provider.handleGitHubCallback({ code: 'gh-code', state }, res)
+        const { state, cookie } = await startSignIn()
+        const res = await callback({ code: 'gh-code', state }, cookie)
         const url = new URL(res.location)
         expect(url.searchParams.get('error')).toBe('server_error')
         expect(url.searchParams.get('state')).toBe('client-state')
@@ -249,9 +413,8 @@ describe('authorize and the GitHub callback', () => {
     })
 
     it('reports a callback without code as server_error', async () => {
-        const state = await startSignIn()
-        const res = fakeResponse()
-        await provider.handleGitHubCallback({ state }, res)
+        const { state, cookie } = await startSignIn()
+        const res = await callback({ state }, cookie)
         expect(new URL(res.location).searchParams.get('error')).toBe('server_error')
     })
 })
