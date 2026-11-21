@@ -35,3 +35,24 @@ jobs:
 
             - name: Run tests
               run: npx vitest run
+
+    # The Claude Desktop extension on Windows: builds the .mcpb, unpacks it and
+    # drives its server over stdio on the bundled runtime (create_site with a
+    # real npm install through the shims, preview, stop). Needs the network.
+    windows:
+        runs-on: windows-latest
+
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Use Node.js 22
+              uses: actions/setup-node@v7
+              with:
+                  node-version: 22
+                  cache: 'npm'
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Smoke-test the Desktop extension
+              run: node scripts/smoke-mcpb.js

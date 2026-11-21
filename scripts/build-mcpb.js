@@ -188,11 +188,14 @@ async function removeBinLinks(dir) {
 }
 
 /**
- * Builds the bundle into the repository root.
+ * Builds the bundle, into the repository root unless `outputDir` names
+ * another folder (the smoke test, scripts/smoke-mcpb.js, builds into a temp one).
  *
+ * @param {object} [options]
+ * @param {string} [options.outputDir]
  * @returns {Promise<string>} the bundle's path
  */
-export async function buildMcpb() {
+export async function buildMcpb({ outputDir = ROOT } = {}) {
     if (!existsSync(BUNDLED_DOCS)) {
         throw new Error(`${path.relative(ROOT, BUNDLED_DOCS)} is missing; run npm run mcpb, which downloads it first`)
     }
@@ -214,7 +217,7 @@ export async function buildMcpb() {
         await fs.copyFile(ICON, path.join(stage, 'icon.png'))
         const manifest = buildManifest({ template, pkg, catalog: await serverCatalog() })
         await fs.writeFile(path.join(stage, 'manifest.json'), `${JSON.stringify(manifest, null, 4)}\n`)
-        const output = path.join(ROOT, bundleName(pkg))
+        const output = path.join(outputDir, bundleName(pkg))
         // packExtension runs `mcpb validate` on the manifest first
         if (!await packExtension({ extensionPath: stage, outputPath: output })) {
             throw new Error('mcpb validate or mcpb pack failed (see above)')
