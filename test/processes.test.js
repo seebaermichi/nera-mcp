@@ -130,7 +130,7 @@ describe('preview', () => {
         const port = Number(call.args[1])
         expect(port).toBeGreaterThan(0)
         expect(result.structuredContent).toEqual({ site: 'site', url: `http://localhost:${port}/`, reused: false })
-        expect(textOf(result)).toContain(`http://localhost:${port}/`)
+        expect(textOf(result)).toBe(`Started the preview at http://localhost:${port}/. Give the user this address. The site rebuilds after every change; the user may need to reload the page to see it.`)
     })
 
     it('reuses the running server on a second call', async () => {
@@ -139,6 +139,7 @@ describe('preview', () => {
         const second = await mcp.call('preview', { site: './site/' })
 
         expect(second.structuredContent).toEqual({ ...first.structuredContent, reused: true })
+        expect(textOf(second)).toMatch(/^The preview is running at http:\/\/localhost:\d+\/\. Give the user this address\. .*may need to reload the page/)
         expect(await callsLog()).toHaveLength(1)
     })
 

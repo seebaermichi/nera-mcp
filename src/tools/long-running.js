@@ -204,7 +204,7 @@ export function registerLongRunningTools(server, ctx) {
 
     server.registerTool('preview', {
         title: 'Preview a Nera site',
-        description: 'Builds a Nera site and serves it on this computer (`nera dev`), rebuilding whenever a page, template or setting changes, and returns the local address (e.g. http://localhost:3000/) for the user to open in a browser. Calling it again for the same site returns the running server\'s address; edits show up there by themselves. Pass `stop: true` to stop it. The server stops when this MCP server closes. If it fails, call validate to find the cause.',
+        description: 'Builds a Nera site and serves it on this computer (`nera dev`), rebuilding whenever a page, template or setting changes, and returns the local address (e.g. http://localhost:3000/) for the user to open in a browser. Calling it again for the same site returns the running server\'s address. After a change the user may need to reload the page in the browser to see it. Pass `stop: true` to stop it. The server stops when this MCP server closes. If it fails, call validate to find the cause.',
         inputSchema: {
             site: siteInput,
             stop: z.boolean().optional().describe('Stop the site\'s running preview instead of starting one. Default false.'),
@@ -244,7 +244,7 @@ export function registerLongRunningTools(server, ctx) {
         }
         return ok(
             { site: resolved.site, url, reused },
-            `${reused ? 'The preview is running' : 'Started the preview'} at ${url}. Give the user this address; it updates by itself when files change.`,
+            `${reused ? 'The preview is running' : 'Started the preview'} at ${url}. Give the user this address. The site rebuilds after every change; the user may need to reload the page to see it.`,
         )
     }))
 

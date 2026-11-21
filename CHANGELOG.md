@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-11-21
+
+### Changed
+
+-   `preview` no longer promises that the page in the browser updates by itself: its description and its result text say the site rebuilds after every change and that the user may need to reload the page to see it. Its inputs and result shape are unchanged.
+
 ## [1.3.0] - 2026-11-19
 
 ### Changed
