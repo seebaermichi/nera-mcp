@@ -140,8 +140,44 @@ A **site** is a folder under the root (or the root itself) whose `package.json` 
 
 ## Compatibility
 
--   Node.js 22.12 or later
+-   Node.js 22.12 or later (22.13 or later for the hosted mode, `--http`)
 -   Brings `@nera-static/nera` 1.27.0 for sites that have none installed. A site with its own CLI installed runs that one: `build` needs 1.9.0 or later (`--json`), `publish` 1.27.0 or later for GitHub Pages and Netlify alike (its sign-in events), and refuses an older one. `npm update` in the site brings it up to date.
+
+## Hosted mode (for operators)
+
+`nera-mcp --http` runs the server for MCP clients that cannot start a local process, such as claude.ai and ChatGPT. This section is for whoever runs such a server; there is no public Nera service to connect to yet. For now the hosted server offers only the catalog tools (`list_starters`, `list_themes`, `list_plugins`); it has no folder to work in, so `--root` is refused together with `--http`.
+
+It is an OAuth 2.1 authorization server in front of a Streamable HTTP endpoint at `/mcp`. Clients register themselves (dynamic client registration) and sign in with PKCE; the sign-in itself is delegated to a GitHub App, so a user only ever logs in at GitHub.
+
+| Path | What |
+|---|---|
+| `/.well-known/oauth-protected-resource/mcp` | protected-resource metadata (RFC 9728) |
+| `/.well-known/oauth-authorization-server` | authorization-server metadata (RFC 8414), S256 only |
+| `/register`, `/authorize`, `/token`, `/revoke` | registration (RFC 7591) and the OAuth endpoints |
+| `/oauth/consent` | where the consent page posts: `/authorize` first shows the user which client asks, and only an approval goes on to GitHub |
+| `/oauth/github/callback` | GitHub's redirect back to the server |
+| `/mcp` | the MCP endpoint; requires a bearer token, answers `401` with a `WWW-Authenticate` pointing at the metadata otherwise |
+
+Requirements: Node.js **22.13 or later** (for `node:sqlite`; the stdio mode stays on 22.12), a TLS proxy in front (nginx, Caddy) that serves the issuer over HTTPS, and a GitHub App with a client secret, its callback URL set to `<issuer>/oauth/github/callback` (expiring user tokens are recommended; the server refreshes them).
+
+The configuration comes from the environment, so no secret shows up in the process list:
+
+| Variable | What |
+|---|---|
+| `NERA_MCP_ISSUER` | the public origin, e.g. `https://mcp.example.org` (HTTPS; plain HTTP only for `localhost`) |
+| `NERA_MCP_DB` | the SQLite file for clients and tokens, created with mode `0600`; back it up |
+| `NERA_MCP_TOKEN_KEY` | 32 bytes as base64 or hex that encrypt the GitHub tokens: `openssl rand -base64 32`. Losing it means every user signs in again |
+| `NERA_MCP_GITHUB_CLIENT_ID` | the GitHub App's client ID |
+| `NERA_MCP_GITHUB_CLIENT_SECRET` | the GitHub App's client secret |
+
+```bash
+nera-mcp --http --port 8080 --host 127.0.0.1 --trust-proxy loopback
+```
+
+-   `--port` (default `8080`, `0` picks a free one) and `--host` (default `127.0.0.1`, so only the proxy on the same machine reaches it).
+-   `--trust-proxy` tells the server which proxies to believe for the client's address, which the rate limits on the OAuth endpoints count by: a number of hops (`1`) or addresses (`loopback`, `10.0.0.0/8`). Without it no proxy is trusted, and behind a proxy every client shares one limit.
+-   A missing variable, a key of the wrong size or a taken port stop the server with exit code 1 and a message on stderr. `SIGTERM` lets running requests finish (up to 10 seconds), closes the database and exits 0.
+-   Logs go to stderr and never contain a token, the key or the client secret. Our own access and refresh tokens are stored only as SHA-256 hashes (access tokens live 1 hour, refresh tokens 30 days and rotate on every use); GitHub's tokens are stored AES-256-GCM-encrypted.
 
 ## License
 

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-21
+
+### Added
+
+-   A hosted mode, `nera-mcp --http [--port] [--host] [--trust-proxy]`, for MCP clients that cannot start a local process (claude.ai, ChatGPT). It is an OAuth 2.1 authorization server with protected-resource metadata (RFC 9728), authorization-server metadata (RFC 8414, S256 PKCE only), dynamic client registration (RFC 7591) and rotating refresh tokens, in front of a stateless Streamable HTTP endpoint at `/mcp` that requires a bearer token issued for it. The sign-in is delegated to a GitHub App, after a consent page that shows the user which client asks. The hosted server offers the catalog tools (`list_starters`, `list_themes`, `list_plugins`) for now.
+-   The hosted mode is configured by `NERA_MCP_ISSUER`, `NERA_MCP_DB`, `NERA_MCP_TOKEN_KEY`, `NERA_MCP_GITHUB_CLIENT_ID` and `NERA_MCP_GITHUB_CLIENT_SECRET`, and stops with exit code 1 and a message naming what is missing or wrong (never a value). It keeps its state in one SQLite file (`node:sqlite`, so it needs Node 22.13 or later; the stdio mode stays on 22.12): our tokens only as SHA-256 hashes, GitHub's tokens AES-256-GCM-encrypted. Its logs go to stderr and never carry a token, the key or the client secret; `SIGTERM` lets running requests finish, closes the database and exits 0.
+-   `express` as a dependency, for the SDK's OAuth router the hosted mode is built on; the stdio mode does not load it.
+
+### Changed
+
+-   The stdio mode refuses `--port`, `--host` and `--trust-proxy` without `--http`, and the hosted mode refuses `--root`, each with a message saying which mode the option belongs to. `--root` stays required for the stdio mode, which is otherwise unchanged.
+
 ## [1.3.1] - 2026-11-21
 
 ### Changed

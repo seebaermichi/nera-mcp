@@ -186,10 +186,18 @@ describe('bin/nera-mcp.js over stdio', () => {
     }, EXIT_MS)
 
     it('exits 1 on an unknown option', async () => {
-        bin = startBin(['--root', tmp.root, '--port', '3000'])
+        bin = startBin(['--root', tmp.root, '--watch'])
 
         expect(await bin.exited).toBe(1)
-        expect(bin.out.stderr).toContain('Unknown option \'--port\'')
+        expect(bin.out.stderr).toContain('Unknown option \'--watch\'')
+        expect(bin.out.stdout).toBe('')
+    }, EXIT_MS)
+
+    it('exits 1 on the hosted options without --http', async () => {
+        bin = startBin(['--root', tmp.root, '--port', '3000', '--trust-proxy', '1'])
+
+        expect(await bin.exited).toBe(1)
+        expect(bin.out.stderr).toContain('--port, --trust-proxy only work together with --http')
         expect(bin.out.stdout).toBe('')
     }, EXIT_MS)
 
