@@ -8,6 +8,9 @@ import { fakeWindowsSpawn, makeRoot, writeFiles } from './helpers.js'
 
 let env
 
+/** Vitest's limit for a case that polls `gone()`: above its own 5 s, so its assertions fail first. */
+const GONE_TIMEOUT = 10_000
+
 beforeEach(async () => {
     env = await makeRoot()
 })
@@ -66,7 +69,7 @@ describe('createRunner', () => {
         const grandchild = Number(run.stdout)
         expect(grandchild).toBeGreaterThan(0)
         expect(await gone(grandchild)).toBe(true)
-    })
+    }, GONE_TIMEOUT)
 
     it('stops a run when its signal aborts (the request was cancelled or the server closed)', async () => {
         const controller = new AbortController()
@@ -116,15 +119,17 @@ describe('createRunner', () => {
 })
 
 describe('stopping a run on Windows', () => {
-    const LONG = ['-e', 'console.log(process.pid); setTimeout(() => {}, 20000)']
+    const LONG = ['-e', 'setTimeout(() => {}, 20000)']
 
     it('ends the whole tree with taskkill /T /F, without a shell and never through a process group', async () => {
-        const { spawn, taskkills } = fakeWindowsSpawn()
+        const { spawn, taskkills, children } = fakeWindowsSpawn()
         const kill = vi.spyOn(process, 'kill')
         const run = await createRunner({ spawn, platform: 'win32', timeout: 200, grace: 5000 })('node', LONG, { cwd: env.site })
 
         expect(run).toMatchObject({ code: null, timedOut: true })
-        const pid = String(Number(run.stdout))
+        expect(children).toHaveLength(1)
+        expect(children[0]).toBeGreaterThan(0)
+        const pid = String(children[0])
         // once, at the stop; not again after the child exited (its pid may be reused by then)
         // by its absolute path: a bare name would be looked up in the working directory first
         const file = `${process.env.SystemRoot || 'C:\\Windows'}\\System32\\taskkill.exe`
@@ -139,7 +144,7 @@ describe('stopping a run on Windows', () => {
     })
 
     it.each(['error', 'throw'])('terminates the child itself when taskkill cannot start (%s), without throwing', async (failure) => {
-        const { spawn, taskkills } = fakeWindowsSpawn({ taskkill: failure })
+        const { spawn, taskkills, children } = fakeWindowsSpawn({ taskkill: failure })
         const controller = new AbortController()
         const pending = createRunner({ spawn, platform: 'win32', grace: 5000 })('node', LONG, { cwd: env.site, signal: controller.signal })
         setTimeout(() => controller.abort(), 200)
@@ -149,22 +154,29 @@ describe('stopping a run on Windows', () => {
         expect(run).toMatchObject({ code: null, cancelled: true })
         expect(Date.now() - started).toBeLessThan(4000)
         expect(taskkills).toHaveLength(1)
-        expect(await gone(Number(run.stdout))).toBe(true)
-    })
+        expect(children).toHaveLength(1)
+        expect(await gone(children[0])).toBe(true)
+    }, GONE_TIMEOUT)
 
     it('leaves POSIX alone: no taskkill, the process group is signalled', async () => {
-        const { spawn, taskkills } = fakeWindowsSpawn()
+        const { spawn, taskkills, children } = fakeWindowsSpawn()
         const kill = vi.spyOn(process, 'kill')
         const run = await createRunner({ spawn, platform: 'linux', timeout: 200 })('node', LONG, { cwd: env.site })
 
         expect(run).toMatchObject({ code: null, timedOut: true })
         expect(taskkills).toEqual([])
-        expect(kill).toHaveBeenCalledWith(-Number(run.stdout), 'SIGTERM')
+        expect(children).toHaveLength(1)
+        expect(children[0]).toBeGreaterThan(0)
+        expect(kill).toHaveBeenCalledWith(-children[0], 'SIGTERM')
     })
 })
 
-/** True once `pid` no longer exists (polled, at most 5 s). */
+/**
+ * True once `pid` no longer exists (polled, at most 5 s). A pid of 0 or less
+ * would address a process group, which always exists, so it fails at once.
+ */
 async function gone(pid) {
+    expect(pid).toBeGreaterThan(0)
     const end = Date.now() + 5000
     for (;;) {
         try {

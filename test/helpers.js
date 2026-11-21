@@ -101,15 +101,22 @@ export function textOf(result) {
  * run, and ends the target with SIGKILL as the real one would (the target is
  * a POSIX child here, so its own children are not reached); everything else
  * is spawned for real. `taskkill: 'error'` makes it fail to start (an `error`
- * event), `'throw'` makes `spawn` itself throw.
+ * event), `'throw'` makes `spawn` itself throw. `children` holds the pid of
+ * every real child it started, in order — known from the spawn, so a test
+ * never has to wait for the child to print it.
  *
  * @param {{ taskkill?: 'kill'|'error'|'throw' }} [options]
- * @returns {{ spawn: typeof nodeSpawn, taskkills: Array<{ file: string, args: string[], options: object }> }}
+ * @returns {{ spawn: typeof nodeSpawn, taskkills: Array<{ file: string, args: string[], options: object }>, children: number[] }}
  */
 export function fakeWindowsSpawn({ taskkill = 'kill' } = {}) {
     const taskkills = []
+    const children = []
     const spawn = (file, args, options) => {
-        if (!/taskkill(\.exe)?$/i.test(file)) return nodeSpawn(file, args, options)
+        if (!/taskkill(\.exe)?$/i.test(file)) {
+            const child = nodeSpawn(file, args, options)
+            children.push(child.pid)
+            return child
+        }
         taskkills.push({ file, args, options })
         if (taskkill === 'throw') throw new Error('spawn taskkill ENOENT')
         const fake = new EventEmitter()
@@ -127,7 +134,7 @@ export function fakeWindowsSpawn({ taskkill = 'kill' } = {}) {
         })
         return fake
     }
-    return { spawn, taskkills }
+    return { spawn, taskkills, children }
 }
 
 /** The eight bytes every PNG file starts with. */
