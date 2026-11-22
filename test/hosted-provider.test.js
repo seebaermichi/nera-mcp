@@ -567,6 +567,11 @@ describe('tokens', () => {
         await provider.revokeToken(CLIENT, { token: tokens.refresh_token })
         expect(await oauthError(provider.exchangeRefreshToken(CLIENT, tokens.refresh_token))).toBe('invalid_grant')
         await expect(provider.revokeToken(CLIENT, { token: 'made-up' })).resolves.toBeUndefined()
+        const other = await tokensFor()
+        await provider.revokeToken(OTHER_CLIENT, { token: other.refresh_token })
+        await expect(provider.verifyAccessToken(other.access_token)).resolves.toBeTruthy()
+        await provider.revokeToken(CLIENT, { token: other.refresh_token })
+        expect(await oauthError(provider.verifyAccessToken(other.access_token))).toBe('invalid_token')
     })
 })
 

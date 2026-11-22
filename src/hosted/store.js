@@ -374,15 +374,25 @@ export function createStore({ file, key, now = Date.now }) {
         },
 
         /**
-         * Revokes an access or refresh token of this client (RFC 7009); an
-         * unknown token is no error.
+         * Revokes an access or refresh token of this client (RFC 7009 §2.1).
+         * A refresh token takes every token of its grant with it, so the
+         * access tokens issued alongside stop working too; an access token
+         * removes only itself, so a client dropping a stale access token keeps
+         * its session. An unknown token or another client's is no error and
+         * revokes nothing.
          *
          * @param {string} token
          * @param {{clientId: string}} request
          * @returns {boolean} whether a token was removed
          */
         revokeToken(token, { clientId }) {
-            return statements.revokeToken.run(hashToken(token), clientId).changes > 0
+            const hash = hashToken(token)
+            return transaction(() => {
+                const row = statements.getToken.get(hash)
+                if (row?.client_id !== clientId) return false
+                if (row.kind === 'refresh') return statements.revokeGrant.run(row.grant_id).changes > 0
+                return statements.revokeToken.run(hash, clientId).changes > 0
+            })
         },
 
         /**

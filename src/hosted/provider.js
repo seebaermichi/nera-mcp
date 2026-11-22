@@ -317,7 +317,6 @@ export function createProvider({ store, github, resource, now = Date.now, log = 
             if (!tokens) throw new InvalidGrantError('The refresh token is invalid, expired or was already used. Sign in again.')
             const granted = store.getAccessToken(tokens.accessToken)
             if (otherResource(resource, granted.resource)) {
-                store.revokeToken(tokens.accessToken, { clientId: client.client_id })
                 store.revokeToken(tokens.refreshToken, { clientId: client.client_id })
                 throw new InvalidTargetError('resource does not match the one the refresh token was issued for. Sign in again.')
             }
@@ -338,7 +337,10 @@ export function createProvider({ store, github, resource, now = Date.now, log = 
             }
         },
 
-        /** RFC 7009: an unknown or another client's token is silently ignored. */
+        /**
+         * RFC 7009: a refresh token revokes its whole grant, an access token
+         * only itself; an unknown or another client's token is silently ignored.
+         */
         async revokeToken(client, request) {
             store.revokeToken(request.token, { clientId: client.client_id })
         },

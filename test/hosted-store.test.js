@@ -267,6 +267,27 @@ describe('createStore', () => {
         expect(store.revokeToken('unknown', { clientId: 'client-1' })).toBe(false)
     })
 
+    it('revokes the whole grant with its refresh token, and no other grant', () => {
+        const tokens = store.issueTokens({ clientId: 'client-1', userId: 1 })
+        const rotated = store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })
+        const other = store.issueTokens({ clientId: 'client-1', userId: 1 })
+        expect(store.revokeToken(rotated.refreshToken, { clientId: 'client-2' })).toBe(false)
+        expect(store.getAccessToken(rotated.accessToken)).not.toBeNull()
+        expect(store.revokeToken(rotated.refreshToken, { clientId: 'client-1' })).toBe(true)
+        expect(store.getAccessToken(rotated.accessToken)).toBeNull()
+        expect(store.rotateRefreshToken(rotated.refreshToken, { clientId: 'client-1' })).toBeNull()
+        expect(store.getAccessToken(other.accessToken)).not.toBeNull()
+        expect(store.rotateRefreshToken(other.refreshToken, { clientId: 'client-1' })).not.toBeNull()
+    })
+
+    it('revokes only the access token itself, leaving its refresh token usable', () => {
+        const tokens = store.issueTokens({ clientId: 'client-1', userId: 1 })
+        expect(store.revokeToken(tokens.accessToken, { clientId: 'client-1' })).toBe(true)
+        const rotated = store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })
+        expect(rotated).not.toBeNull()
+        expect(store.getAccessToken(rotated.accessToken)).not.toBeNull()
+    })
+
     it('round-trips a GitHub user with tokens and replaces them on a later login', () => {
         store.saveGithubUser(GITHUB_USER)
         expect(store.getGithubUser(4242)).toEqual({ ...GITHUB_USER, id: '4242' })
