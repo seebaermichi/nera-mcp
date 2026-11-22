@@ -4,8 +4,13 @@
 // writes, plus contents (following a symbolic link to a file, as GitHub
 // does), compares, merges and tarballs. It records every request and
 // accepts one token only. `github.intercept` lets a test answer a request
-// itself (a lost race, an outage) before the fake does.
+// itself (a lost race, an outage) before the fake does. `connectHosted`
+// connects a real MCP client to the hosted server, talking to such a fake.
 import { posix } from 'node:path'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { createHostedServer } from '../src/hosted/mcp.js'
+import { createRepoClient } from '../src/hosted/repo.js'
 
 export const API = 'https://api.github.example'
 const SYMLINK_MODE = '120000'
@@ -289,4 +294,39 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
     }
 
     return github
+}
+
+/**
+ * A real MCP client connected in memory to the hosted server, signed in as
+ * `userId` with the fake's token. `githubToken` can be replaced to fake a lost
+ * sign-in.
+ *
+ * @param {ReturnType<typeof fakeGitHub>} github
+ * @param {object} [options]
+ * @param {(userId: string) => Promise<string>} [options.githubToken]
+ * @param {string} [options.userId]
+ */
+export async function connectHosted(github, { githubToken = async () => github.token, userId = 'user-1' } = {}) {
+    const tokenRequests = []
+    const server = createHostedServer({
+        fetch: async () => { throw new Error('the registry is not expected in this test') },
+        userId,
+        githubToken: async (id) => {
+            tokenRequests.push(id)
+            return githubToken(id)
+        },
+        createRepo: (token) => createRepoClient({ token, fetch: github.fetch, apiUrl: API }),
+    })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'nera-mcp-test', version: '0.0.0' })
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+    return {
+        client,
+        tokenRequests,
+        call: (name, args = {}) => client.callTool({ name, arguments: args }),
+        close: async () => {
+            await client.close()
+            await server.close()
+        },
+    }
 }

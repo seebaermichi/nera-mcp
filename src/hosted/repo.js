@@ -70,6 +70,20 @@ export function repoName(site) {
     return site
 }
 
+/**
+ * Checks a commit message a model passed: not empty.
+ *
+ * @param {string} message
+ * @returns {string}
+ * @throws {ToolError}
+ */
+export function commitMessage(message) {
+    if (typeof message !== 'string' || message.trim() === '') {
+        throw new ToolError('The commit message is empty. Say in one line what the change does, e.g. "Add the about page".')
+    }
+    return message
+}
+
 /** `path` with each segment percent-encoded, for an API URL. */
 function encodePath(path) {
     return path.split('/').map(encodeURIComponent).join('/')
@@ -287,9 +301,7 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
          */
         async commitFile(repo, { path, content, message }) {
             const file = repoPath(path)
-            if (typeof message !== 'string' || message.trim() === '') {
-                throw new ToolError('The commit message is empty. Say in one line what the change does, e.g. "Add the about page".')
-            }
+            commitMessage(message)
             let blob = null
             if (content !== null) {
                 const { body } = await request('POST', `${repoUrl(repo)}/git/blobs`, {

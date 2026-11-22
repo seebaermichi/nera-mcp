@@ -7,7 +7,7 @@ import { createHostedServer } from '../src/hosted/mcp.js'
 import { SignInRequiredError } from '../src/hosted/provider.js'
 import { createRepoClient } from '../src/hosted/repo.js'
 import { repoFolder, treeFolders } from '../src/hosted/tools/read.js'
-import { API, fakeGitHub } from './fake-github.js'
+import { API, connectHosted, fakeGitHub } from './fake-github.js'
 import { SITE_PACKAGE, textOf } from './helpers.js'
 
 const SITE = 'octo/site'
@@ -26,35 +26,8 @@ const SITE_FILES = {
 let github
 let session
 
-/**
- * A real MCP client connected in memory to the hosted server, signed in as
- * `USER` with the fake's token. `githubToken` can be replaced to fake a lost
- * sign-in.
- */
-async function connect({ githubToken = async () => github.token, userId = USER } = {}) {
-    const tokenRequests = []
-    const server = createHostedServer({
-        fetch: async () => { throw new Error('the registry is not expected in this test') },
-        userId,
-        githubToken: async (id) => {
-            tokenRequests.push(id)
-            return githubToken(id)
-        },
-        createRepo: (token) => createRepoClient({ token, fetch: github.fetch, apiUrl: API }),
-    })
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-    const client = new Client({ name: 'nera-mcp-test', version: '0.0.0' })
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
-    return {
-        client,
-        tokenRequests,
-        call: (name, args = {}) => client.callTool({ name, arguments: args }),
-        close: async () => {
-            await client.close()
-            await server.close()
-        },
-    }
-}
+/** A client signed in as `USER`; see `connectHosted`. */
+const connect = (options = {}) => connectHosted(github, { userId: USER, ...options })
 
 beforeEach(async () => {
     github = fakeGitHub()
@@ -73,10 +46,10 @@ function expectError(result, pattern) {
 }
 
 describe('registration', () => {
-    it('offers the read tools next to the catalog tools when a user is bound', async () => {
+    it('offers the read and write tools next to the catalog tools when a user is bound', async () => {
         const { tools } = await session.client.listTools()
         expect(tools.map((tool) => tool.name).sort()).toEqual([
-            'get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page',
+            'delete_page', 'get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page', 'write_file', 'write_page',
         ])
         for (const name of ['list_sites', 'get_site', 'read_page', 'read_file']) {
             expect(tools.find((tool) => tool.name === name).annotations.readOnlyHint).toBe(true)

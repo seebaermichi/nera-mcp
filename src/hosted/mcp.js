@@ -8,6 +8,7 @@ import pkg from '../../package.json' with { type: 'json' }
 import { registerCatalogTools } from '../catalog.js'
 import { createRepoClient } from './repo.js'
 import { registerHostedReadTools } from './tools/read.js'
+import { registerHostedWriteTools } from './tools/write.js'
 
 /**
  * Builds the hosted MCP server, with no transport attached. Without a user
@@ -29,14 +30,16 @@ export function createHostedServer({
     const server = new McpServer(
         { name: pkg.name, version: pkg.version },
         {
-            instructions: 'Tools for Nera, a static site generator: a site is Markdown pages rendered through Pug layouts into plain HTML. This hosted server works on your Nera sites in GitHub repositories: list_sites finds them, get_site describes one, read_page and read_file read its files. It also lists the Nera starter kits, themes and plugins. The full documentation is at https://nera.js.org/llms-full.txt.',
+            instructions: 'Tools for Nera, a static site generator: a site is Markdown pages rendered through Pug layouts into plain HTML. This hosted server works on your Nera sites in GitHub repositories: list_sites finds them, get_site describes one, read_page and read_file read its files, write_page, write_file and delete_page change them as one commit each on the draft branch nera-draft, which goes live only with publish. It also lists the Nera starter kits, themes and plugins. The full documentation is at https://nera.js.org/llms-full.txt.',
         },
     )
     registerCatalogTools(server, { fetch })
     if (userId && githubToken) {
         // The token is fetched per tool call, so a refreshed one is used and a
         // lost sign-in becomes that call's error, not the request's.
-        registerHostedReadTools(server, { repos: async () => createRepo(await githubToken(userId)) })
+        const repos = async () => createRepo(await githubToken(userId))
+        registerHostedReadTools(server, { repos })
+        registerHostedWriteTools(server, { repos })
     }
     return server
 }

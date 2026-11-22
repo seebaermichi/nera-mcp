@@ -340,7 +340,7 @@ describe('/mcp', () => {
         const { access_token: token } = await tokens()
         const client = await connectClient(token)
         const { tools } = await client.listTools()
-        expect(tools.map((tool) => tool.name).sort()).toEqual(['get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page'])
+        expect(tools.map((tool) => tool.name).sort()).toEqual(['delete_page', 'get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page', 'write_file', 'write_page'])
         await client.close()
     })
 

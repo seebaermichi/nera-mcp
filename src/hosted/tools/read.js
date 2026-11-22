@@ -5,7 +5,9 @@
 // `@nera-static/nera`; any other name is refused before a file is read. Reads
 // come from the draft branch `nera-draft` while it exists (that is where the
 // write tools commit), else from `main`. The page rules are the local mode's
-// (src/pages.js), the folders are core's (`computeFolders`).
+// (src/pages.js), the folders are core's (`computeFolders`). The site lookup
+// (`createSiteAccess`) and the error wrapper (`hostedTool`) are shared with
+// the write tools (./write.js).
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -20,19 +22,19 @@ import { SignInRequiredError } from '../provider.js'
 import { BASE_BRANCH, DRAFT_BRANCH, repoName, repoPath } from '../repo.js'
 
 /** Larger files are refused by read_file: a model cannot use them whole. */
-const MAX_READ_BYTES = 1024 * 1024
+export const MAX_READ_BYTES = 1024 * 1024
 /** What a user does when GitHub no longer accepts their sign-in. */
 const RECONNECT = 'Sign in again: remove the Nera connector in your AI assistant and connect it once more.'
 /** git's mode of a symbolic link: never listed, never read through. */
-const SYMLINK_MODE = '120000'
+export const SYMLINK_MODE = '120000'
 
 export const hostedSiteInput = z
     .string()
     .describe('The site: its GitHub repository as owner/name (e.g. `octo/my-site`), as list_sites returns it.')
-const pageInput = z
+export const pageInput = z
     .string()
     .describe('The page file, relative to the repository root, inside the site\'s pages folder and ending in .md — e.g. `pages/about.md` or `pages/blog/first-post.md`. The page is published at the same path with .html (`/about.html`).')
-const fileInput = z
+export const fileInput = z
     .string()
     .describe('The file, relative to the repository root — e.g. `config/app.yaml`, `theme/views/layouts/default.pug`, `assets/css/main.css`.')
 
@@ -111,7 +113,7 @@ function parsePackage(file) {
  * is gone and a refusal by GitHub become `isError` results too, with their own
  * messages, which never hold a token.
  */
-function hostedTool(handler) {
+export function hostedTool(handler) {
     const wrapped = tool(handler)
     return async (args, extra) => {
         try {
@@ -128,13 +130,29 @@ function hostedTool(handler) {
 }
 
 /**
- * Registers the hosted read tools.
+ * Checks that `file` is a page: inside the site's pages folder, ending in `.md`.
  *
- * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
- * @param {object} ctx
- * @param {() => Promise<ReturnType<import('../repo.js').createRepoClient>>} ctx.repos the signed-in user's repository client
+ * @param {string} file a repository path, already checked with `repoPath`
+ * @param {Record<string, string>} folders the site's folders (`treeFolders`)
+ * @throws {ToolError}
  */
-export function registerHostedReadTools(server, { repos }) {
+export function requirePagePath(file, folders) {
+    const pagesFolder = repoFolder(folders.pages, 'pages')
+    if (!file.startsWith(`${pagesFolder}/`)) {
+        throw new ToolError(`"${file}" is not inside the site's pages folder (${pagesFolder}/). Give a path like ${pagesFolder}/about.md; for other files use read_file / write_file.`)
+    }
+    if (path.posix.extname(file) !== '.md') {
+        throw new ToolError(`"${file}" does not end in .md. Pages are Markdown files, e.g. ${pagesFolder}/about.md.`)
+    }
+}
+
+/**
+ * The site lookup every hosted tool goes through (plan D3), bound to the
+ * signed-in user's repository client.
+ *
+ * @param {() => Promise<ReturnType<import('../repo.js').createRepoClient>>} repos
+ */
+export function createSiteAccess(repos) {
     /**
      * Resolves a `site` argument: a repository the user's installations reach,
      * whose package.json (on the branch reads come from) depends on
@@ -164,11 +182,14 @@ export function registerHostedReadTools(server, { repos }) {
         return { client, site, branch, ref, draft: { exists: Boolean(draftSha), sha: draftSha }, mainSha, pkg }
     }
 
-    /** Reads `file` at the site's read ref, refusing a symbolic link and a folder. */
-    async function readAt(target, file, what) {
-        const found = await target.client.readFile(target.site, file, target.ref, { maxBytes: MAX_READ_BYTES })
+    /**
+     * Reads `file` at `ref` (default: the site's read ref), refusing a
+     * symbolic link and a folder.
+     */
+    async function readAt(target, file, what, ref = target.ref) {
+        const found = await target.client.readFile(target.site, file, ref, { maxBytes: MAX_READ_BYTES })
         if (found?.type === 'symlink') {
-            throw new ToolError(`"${file}" is a symbolic link in ${target.site}; these tools do not follow links. Read the file it points to instead.`)
+            throw new ToolError(`"${file}" is a symbolic link in ${target.site}; these tools do not follow links. Use the file it points to instead.`)
         }
         if (found?.type === 'dir') throw new ToolError(`"${file}" is a folder, not ${what}.`)
         return found
@@ -183,6 +204,19 @@ export function registerHostedReadTools(server, { repos }) {
         const folders = treeFolders(appConfig, tree.entries)
         return { appConfig, appConfigError, folders, tree }
     }
+
+    return { openSite, readAt, siteModel }
+}
+
+/**
+ * Registers the hosted read tools.
+ *
+ * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
+ * @param {object} ctx
+ * @param {() => Promise<ReturnType<import('../repo.js').createRepoClient>>} ctx.repos the signed-in user's repository client
+ */
+export function registerHostedReadTools(server, { repos }) {
+    const { openSite, readAt, siteModel } = createSiteAccess(repos)
 
     server.registerTool('list_sites', {
         title: 'List Nera sites',
@@ -254,13 +288,7 @@ export function registerHostedReadTools(server, { repos }) {
         refuseSecrets(file, file)
         const target = await openSite(site)
         const { folders } = await siteModel(target)
-        const pagesFolder = repoFolder(folders.pages, 'pages')
-        if (!file.startsWith(`${pagesFolder}/`)) {
-            throw new ToolError(`"${file}" is not inside the site's pages folder (${pagesFolder}/). Give a path like ${pagesFolder}/about.md; for other files use read_file / write_file.`)
-        }
-        if (path.posix.extname(file) !== '.md') {
-            throw new ToolError(`"${file}" does not end in .md. Pages are Markdown files, e.g. ${pagesFolder}/about.md.`)
-        }
+        requirePagePath(file, folders)
         const found = await readAt(target, file, 'a page')
         if (!found) {
             throw new ToolError(`The page "${file}" does not exist on ${target.branch} of ${target.site}. Call get_site for the list of pages, or write_page to create it.`)
