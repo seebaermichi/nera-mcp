@@ -11,7 +11,8 @@
 // The issuer is configured, never taken from the request: behind a TLS proxy
 // the request says `http://127.0.0.1:…`, while every URL we publish must be the
 // public `https://` one. `/mcp` is stateless — each POST gets a fresh server
-// and transport, bound to the caller's token through `req.auth`.
+// and transport, bound to the caller's token through `req.auth`, whose
+// `extra.userId` picks the GitHub sign-in the site tools act as.
 import express from 'express'
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js'
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js'
@@ -59,12 +60,13 @@ function issuerUrl(issuer) {
  * @param {ReturnType<import('./store.js').createStore>} options.store
  * @param {ReturnType<import('./github.js').createGitHubClient>} options.github with `<issuer>/oauth/github/callback` as its redirect URI
  * @param {typeof fetch} [options.fetch] fetches the npm registry catalogs for the tools
+ * @param {(token: string) => ReturnType<import('./repo.js').createRepoClient>} [options.createRepo] builds the site tools' repository client for a user's GitHub token
  * @param {() => number} [options.now] the clock in milliseconds
  * @param {(message: string) => void} [options.log] where failures are reported (never with a token in them)
  * @param {boolean|number|string} [options.trustProxy] Express's `trust proxy`, so the rate limits see the client's address behind a proxy
  * @returns {{ app: import('express').Express, provider: ReturnType<typeof createProvider> }}
  */
-export function createHostedApp({ issuer, store, github, fetch = globalThis.fetch, now, log = () => {}, trustProxy = false }) {
+export function createHostedApp({ issuer, store, github, fetch = globalThis.fetch, createRepo, now, log = () => {}, trustProxy = false }) {
     const base = issuerUrl(issuer)
     const resource = new URL(MCP_PATH, base)
     const provider = createProvider({ store, github, resource, now, log })
@@ -85,7 +87,12 @@ export function createHostedApp({ issuer, store, github, fetch = globalThis.fetc
         expectedResource: resource,
     }))
     app.post(MCP_PATH, express.json({ limit: MCP_BODY_LIMIT }), async (req, res) => {
-        const server = createHostedServer({ fetch })
+        const server = createHostedServer({
+            fetch,
+            userId: req.auth.extra?.userId,
+            githubToken: (userId) => provider.githubToken(userId),
+            createRepo,
+        })
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
         // Both close calls are async; allSettled keeps a failed close from becoming an unhandled rejection.
         res.on('close', () => void Promise.allSettled([transport.close(), server.close()]))

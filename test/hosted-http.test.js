@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createHostedApp, GITHUB_CALLBACK_PATH, MCP_PATH } from '../src/hosted/app.js'
 import { CONSENT_COOKIE, CONSENT_PATH } from '../src/hosted/consent.js'
 import { createGitHubClient } from '../src/hosted/github.js'
+import { createRepoClient } from '../src/hosted/repo.js'
 import { createStore, TTL } from '../src/hosted/store.js'
+import { API, fakeGitHub } from './fake-github.js'
+import { SITE_PACKAGE } from './helpers.js'
 
 const KEY = Buffer.alloc(32, 7).toString('base64')
 const CLIENT_REDIRECT = 'https://claude.ai/api/mcp/auth_callback'
@@ -37,6 +40,7 @@ let store
 let server
 let issuer
 let logs
+let repos
 
 beforeEach(async () => {
     clock = Date.now()
@@ -55,7 +59,18 @@ beforeEach(async () => {
         now,
     })
     logs = []
-    const { app } = createHostedApp({ issuer, store, github, fetch: async () => new Response('offline', { status: 503 }), now, log: (line) => logs.push(line) })
+    // the repositories of the first sign-in's user, whose token is ghu_access1
+    repos = fakeGitHub({ token: 'ghu_access1' })
+    repos.addRepo('octo/site', { 'package.json': SITE_PACKAGE })
+    const { app } = createHostedApp({
+        issuer,
+        store,
+        github,
+        fetch: async () => new Response('offline', { status: 503 }),
+        createRepo: (token) => createRepoClient({ token, fetch: repos.fetch, apiUrl: API }),
+        now,
+        log: (line) => logs.push(line),
+    })
     server.on('request', app)
 })
 
@@ -321,11 +336,34 @@ describe('/token', () => {
 })
 
 describe('/mcp', () => {
-    it('serves MCP with a valid token: an SDK client lists the catalog tools', async () => {
+    it('serves MCP with a valid token: an SDK client lists the catalog and site tools', async () => {
         const { access_token: token } = await tokens()
         const client = await connectClient(token)
         const { tools } = await client.listTools()
-        expect(tools.map((tool) => tool.name).sort()).toEqual(['list_plugins', 'list_starters', 'list_themes'])
+        expect(tools.map((tool) => tool.name).sort()).toEqual(['get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page'])
+        await client.close()
+    })
+
+    it('runs the site tools as the signed-in user, with their GitHub token', async () => {
+        const { access_token: token } = await tokens()
+        const client = await connectClient(token)
+        const result = await client.callTool({ name: 'list_sites', arguments: {} })
+        expect(result.isError).toBeFalsy()
+        expect(result.structuredContent.sites.map((site) => site.site)).toEqual(['octo/site'])
+        expect(repos.requests.every((request) => request.headers.Authorization === 'Bearer ghu_access1')).toBe(true)
+        expect(JSON.stringify(result)).not.toContain('ghu_access1')
+        await client.close()
+    })
+
+    it('answers a site tool with a reconnect message when the GitHub sign-in is gone', async () => {
+        const { access_token: token } = await tokens()
+        // the GitHub user (id 4242 at the fake) now holds a token that expired with no refresh token left
+        const past = Math.floor(clock / 1000) - 60
+        store.saveGithubUser({ id: 4242, login: 'octo', accessToken: 'ghu_old', accessTokenExpiresAt: past })
+        const client = await connectClient(token)
+        const result = await client.callTool({ name: 'list_sites', arguments: {} })
+        expect(result.isError).toBe(true)
+        expect(result.content[0].text).toMatch(/The GitHub sign-in has expired\. Sign in again: remove the Nera connector/)
         await client.close()
     })
 

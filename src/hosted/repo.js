@@ -197,13 +197,19 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
          * @param {string} repo `owner/name`
          * @param {string} path checked with `repoPath`
          * @param {string} ref a branch or commit
-         * @returns {Promise<{type: 'file', content: Buffer, size: number, sha: string} | {type: 'dir'} | null>} null when nothing is at `path`
+         * @param {object} [options]
+         * @param {number} [options.maxBytes] a larger file comes with `content` null, without downloading it
+         * @returns {Promise<{type: 'file', content: Buffer|null, size: number, sha: string} | {type: 'dir'} | {type: 'symlink'} | null>} null when nothing is at `path`
          */
-        async readFile(repo, path, ref) {
+        async readFile(repo, path, ref, { maxBytes = Infinity } = {}) {
             const { status, body } = await request('GET', `${repoUrl(repo)}/contents/${encodePath(repoPath(path))}?ref=${encodeURIComponent(ref)}`, { accept: [404] })
             if (status === 404) return null
             if (Array.isArray(body) || body.type === 'dir') return { type: 'dir' }
+            // The contents API follows a symbolic link to a file and answers
+            // with the target (another path), so a link is never read through.
+            if (body.type === 'symlink' || (body.type === 'file' && body.path !== path)) return { type: 'symlink' }
             if (body.type !== 'file') return null
+            if (body.size > maxBytes) return { type: 'file', content: null, size: body.size, sha: body.sha }
             let base64 = body.content
             // Files over 1 MB come without content; the blob API has it.
             if (body.encoding !== 'base64') {
@@ -218,16 +224,30 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
          *
          * @param {string} repo `owner/name`
          * @param {string} ref a branch or commit
-         * @returns {Promise<{entries: Array<{path: string, type: 'blob'|'tree', size?: number}>, truncated: boolean}>}
+         * @returns {Promise<{entries: Array<{path: string, type: 'blob'|'tree', mode: string, size?: number}>, truncated: boolean}>}
+         *     `mode` is git's: `120000` marks a symbolic link
          */
         async readTree(repo, ref) {
             const { body } = await request('GET', `${repoUrl(repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`)
             return {
                 entries: body.tree
                     .filter((entry) => entry.type === 'blob' || entry.type === 'tree')
-                    .map((entry) => ({ path: entry.path, type: entry.type, ...(entry.size === undefined ? {} : { size: entry.size }) })),
+                    .map((entry) => ({ path: entry.path, type: entry.type, mode: entry.mode, ...(entry.size === undefined ? {} : { size: entry.size }) })),
                 truncated: Boolean(body.truncated),
             }
+        },
+
+        /**
+         * How many commits `head` has that `base` lacks.
+         *
+         * @param {string} repo `owner/name`
+         * @param {string} base a branch or commit
+         * @param {string} head a branch or commit
+         * @returns {Promise<number>}
+         */
+        async aheadBy(repo, base, head) {
+            const { body } = await request('GET', `${repoUrl(repo)}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`)
+            return body.ahead_by
         },
 
         /**

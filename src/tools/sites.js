@@ -30,12 +30,38 @@ async function readPackage(dir) {
     }
 }
 
+/**
+ * @param {object|null} pkg a parsed package.json
+ * @returns {Record<string, string>} its dependencies and devDependencies
+ */
 function allDependencies(pkg) {
     return { ...pkg?.devDependencies, ...pkg?.dependencies }
 }
 
-function isNeraSite(pkg) {
-    return Boolean(allDependencies(pkg)[CLI_PACKAGE])
+/**
+ * @param {object|null} pkg a parsed package.json
+ * @returns {boolean} whether it is a Nera site's: it depends on `@nera-static/nera`
+ */
+export function isNeraSite(pkg) {
+    return Boolean(neraRange(pkg))
+}
+
+/**
+ * @param {object|null} pkg a parsed package.json
+ * @returns {string|undefined} the `@nera-static/nera` range it depends on
+ */
+export function neraRange(pkg) {
+    return allDependencies(pkg)[CLI_PACKAGE]
+}
+
+/**
+ * @param {object|null} pkg a parsed package.json
+ * @returns {string[]} the Nera plugins it depends on, sorted
+ */
+export function sitePlugins(pkg) {
+    return Object.keys(allDependencies(pkg))
+        .filter((name) => name.startsWith(PLUGIN_PREFIX) && !NOT_PLUGINS.has(name))
+        .sort()
 }
 
 /**
@@ -110,7 +136,7 @@ export async function findSites(root) {
             found.push({
                 site: relativeTo(root, dir),
                 name: pkg.name ?? null,
-                nera: allDependencies(pkg)[CLI_PACKAGE],
+                nera: neraRange(pkg),
             })
             return
         }
@@ -158,14 +184,12 @@ export function registerSiteTools(server, ctx) {
     }, tool(async ({ site }) => {
         const resolved = await resolveSite(ctx, site)
         const { model, pagesDir } = await siteFolders(resolved.dir)
-        const plugins = Object.keys(allDependencies(resolved.pkg))
-            .filter((name) => name.startsWith(PLUGIN_PREFIX) && !NOT_PLUGINS.has(name))
-            .sort()
+        const plugins = sitePlugins(resolved.pkg)
         const pages = await listPages(resolved.dir, pagesDir)
         const structured = {
             site: resolved.site,
             name: resolved.pkg.name ?? null,
-            nera: allDependencies(resolved.pkg)[CLI_PACKAGE],
+            nera: neraRange(resolved.pkg),
             app: model.appConfig,
             appConfigError: model.appConfigError,
             folders: model.folders,

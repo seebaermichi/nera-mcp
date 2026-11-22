@@ -1,11 +1,14 @@
 // A fake GitHub REST API in memory, behind an injectable `fetch`: the user's
 // App installations and their repositories, and per repository the git data
 // (blobs, trees, commits, refs) the repo client (src/hosted/repo.js) reads and
-// writes, plus contents, merges and tarballs. It records every request and
+// writes, plus contents (following a symbolic link to a file, as GitHub
+// does), compares, merges and tarballs. It records every request and
 // accepts one token only. `github.intercept` lets a test answer a request
 // itself (a lost race, an outage) before the fake does.
+import { posix } from 'node:path'
 
 export const API = 'https://api.github.example'
+const SYMLINK_MODE = '120000'
 
 /**
  * @param {object} [options]
@@ -30,7 +33,7 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
      * Adds a repository whose `main` holds `files` in one commit.
      *
      * @param {string} fullName `owner/name`
-     * @param {Record<string, string>} files path → content
+     * @param {Record<string, string|{symlink: string}>} files path → content, or a symbolic link to `symlink` (relative to the link's folder)
      * @param {object} [options]
      * @param {number} [options.installation] the installation that reaches it
      * @param {boolean} [options.private]
@@ -40,7 +43,9 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
         github.repos.set(fullName, repo)
         const entries = new Map()
         for (const [path, content] of Object.entries(files)) {
-            entries.set(path, { sha: github.addBlob(fullName, content), mode: '100644' })
+            entries.set(path, typeof content === 'object'
+                ? { sha: github.addBlob(fullName, content.symlink), mode: SYMLINK_MODE }
+                : { sha: github.addBlob(fullName, content), mode: '100644' })
         }
         const tree = nextSha()
         repo.trees.set(tree, entries)
@@ -188,14 +193,46 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
             const commit = repo.commits.get(repo.refs.get(ref) ?? ref)
             if (!commit) return notFound()
             const entries = repo.trees.get(commit.tree)
-            const file = entries.get(path)
+            let file = entries.get(path)
+            let filePath = path
+            if (file?.mode === SYMLINK_MODE) {
+                // Like GitHub: a link to a file answers with the target, anything else describes the link.
+                const target = posix.normalize(posix.join(posix.dirname(path), repo.blobs.get(file.sha).toString('utf8')))
+                const targetFile = entries.get(target)
+                if (!targetFile || targetFile.mode === SYMLINK_MODE) {
+                    return json({ type: 'symlink', path, sha: file.sha, target: repo.blobs.get(file.sha).toString('utf8') })
+                }
+                file = targetFile
+                filePath = target
+            }
             if (file) {
                 const blob = repo.blobs.get(file.sha)
                 const large = blob.length > 1024 * 1024
-                return json({ type: 'file', path, sha: file.sha, size: blob.length, encoding: large ? 'none' : 'base64', content: large ? '' : blob.toString('base64') })
+                return json({ type: 'file', path: filePath, sha: file.sha, size: blob.length, encoding: large ? 'none' : 'base64', content: large ? '' : blob.toString('base64') })
             }
             const children = [...entries.keys()].filter((candidate) => candidate.startsWith(`${path}/`))
             return children.length ? json(children.map((child) => ({ type: 'file', path: child }))) : notFound()
+        }
+        if (method === 'GET' && (match = rest.match(/^compare\/([^.]+)\.\.\.([^?]+)$/))) {
+            const base = repo.refs.get(decodeURIComponent(match[1])) ?? decodeURIComponent(match[1])
+            const head = repo.refs.get(decodeURIComponent(match[2])) ?? decodeURIComponent(match[2])
+            if (!repo.commits.has(base) || !repo.commits.has(head)) return notFound()
+            const reachable = (start) => {
+                const seen = new Set()
+                const queue = [start]
+                while (queue.length) {
+                    const current = queue.shift()
+                    if (seen.has(current)) continue
+                    seen.add(current)
+                    queue.push(...repo.commits.get(current).parents)
+                }
+                return seen
+            }
+            const fromBase = reachable(base)
+            const fromHead = reachable(head)
+            const aheadBy = [...fromHead].filter((sha) => !fromBase.has(sha)).length
+            const behindBy = [...fromBase].filter((sha) => !fromHead.has(sha)).length
+            return json({ ahead_by: aheadBy, behind_by: behindBy })
         }
         if (method === 'POST' && rest === 'merges') {
             const base = repo.refs.get(body.base)

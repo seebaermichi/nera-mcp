@@ -132,6 +132,30 @@ describe('reading', () => {
         expect(github.requests.some(({ path }) => path.includes('/git/blobs/'))).toBe(true)
     })
 
+    it('leaves a file over maxBytes undownloaded', async () => {
+        github.pushFile(SITE, BASE_BRANCH, 'assets/large.txt', 'x'.repeat(1024 * 1024 + 1))
+        const file = await client.readFile(SITE, 'assets/large.txt', BASE_BRANCH, { maxBytes: 1024 })
+        expect(file).toMatchObject({ type: 'file', content: null, size: 1024 * 1024 + 1 })
+        expect(github.requests.some(({ path }) => path.includes('/git/blobs/'))).toBe(false)
+    })
+
+    it('never reads through a symbolic link: one to a file and one to nothing are both a symlink', async () => {
+        github.addRepo('octo/links', { 'secret.env': 'TOKEN=x', 'alias.txt': { symlink: 'secret.env' }, 'dangling.txt': { symlink: 'gone' } })
+        expect(await client.readFile('octo/links', 'alias.txt', BASE_BRANCH)).toEqual({ type: 'symlink' })
+        expect(await client.readFile('octo/links', 'dangling.txt', BASE_BRANCH)).toEqual({ type: 'symlink' })
+        const { entries } = await client.readTree('octo/links', BASE_BRANCH)
+        expect(entries.find(({ path }) => path === 'alias.txt').mode).toBe('120000')
+    })
+
+    it('counts the commits one ref has that another lacks', async () => {
+        await client.ensureDraft(SITE)
+        expect(await client.aheadBy(SITE, BASE_BRANCH, DRAFT_BRANCH)).toBe(0)
+        github.pushFile(SITE, DRAFT_BRANCH, 'pages/a.md', 'a')
+        github.pushFile(SITE, DRAFT_BRANCH, 'pages/b.md', 'b')
+        github.pushFile(SITE, BASE_BRANCH, 'pages/c.md', 'c')
+        expect(await client.aheadBy(SITE, BASE_BRANCH, DRAFT_BRANCH)).toBe(2)
+    })
+
     it('refuses an escaping path before asking GitHub', async () => {
         await expect(client.readFile(SITE, '../other/secret', BASE_BRANCH)).rejects.toThrow(ToolError)
         expect(github.requests).toHaveLength(0)
