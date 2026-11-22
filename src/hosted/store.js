@@ -10,15 +10,23 @@
 //
 // Every code and the tokens issued from it share a `grant_id`, kept through
 // every refresh rotation. A used code and a rotated refresh token leave a
-// tombstone (their hash, the grant id, the expiry they had), so presenting
-// one again is recognised as a replay and revokes the whole grant (OAuth 2.1's
-// code reuse rule, the Security BCP's refresh-token reuse detection). Only the
-// hosted mode loads this module — `node:sqlite` needs Node >= 22.13, while the
-// stdio server (`src/server.js`) stays on the package's 22.12 floor.
+// tombstone (their hash, the grant id, the client id, the expiry they had),
+// so presenting one again is recognised as a replay and revokes the whole
+// grant (OAuth 2.1's code reuse rule, the Security BCP's refresh-token reuse
+// detection); the operator learns of it through one `log` line naming the
+// client id and the grant id, never a token or its hash. Only the hosted mode
+// loads this module — `node:sqlite` needs Node >= 22.13, while the stdio
+// server (`src/server.js`) stays on the package's 22.12 floor.
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmodSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { decrypt, encrypt, hashToken, parseKey, randomToken } from './crypto.js'
+
+/** What a replay's log line says was sent again, by tombstone kind. */
+const REPLAYED = Object.freeze({
+    code: 'a used authorization code',
+    refresh: 'an already rotated refresh token',
+})
 
 /** Lifetimes in seconds (plan D3). */
 export const TTL = Object.freeze({
@@ -65,6 +73,7 @@ CREATE TABLE IF NOT EXISTS tombstones (
     hash TEXT PRIMARY KEY,
     kind TEXT NOT NULL CHECK (kind IN ('code', 'refresh')),
     grant_id TEXT NOT NULL,
+    client_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS github_users (
@@ -95,8 +104,10 @@ CREATE TABLE IF NOT EXISTS github_users (
  * @param {string} options.file the SQLite file, or `:memory:`
  * @param {string|Buffer} options.key the token key (`parseKey`)
  * @param {() => number} [options.now] the clock in milliseconds, for tests
+ * @param {(message: string) => void} [options.log] receives one line per
+ *   detected replay (client id and grant id, never a token); silent by default
  */
-export function createStore({ file, key, now = Date.now }) {
+export function createStore({ file, key, now = Date.now, log = () => {} }) {
     const secretKey = parseKey(key)
     const db = new DatabaseSync(file)
     if (file !== ':memory:') {
@@ -124,8 +135,8 @@ export function createStore({ file, key, now = Date.now }) {
         getToken: db.prepare('SELECT kind, grant_id, client_id, user_id, scopes, resource, expires_at FROM tokens WHERE token_hash = ?'),
         deleteToken: db.prepare('DELETE FROM tokens WHERE token_hash = ?'),
         revokeGrant: db.prepare('DELETE FROM tokens WHERE grant_id = ?'),
-        saveTombstone: db.prepare('INSERT OR REPLACE INTO tombstones (hash, kind, grant_id, expires_at) VALUES (?, ?, ?, ?)'),
-        getTombstone: db.prepare('SELECT kind, grant_id, expires_at FROM tombstones WHERE hash = ?'),
+        saveTombstone: db.prepare('INSERT OR REPLACE INTO tombstones (hash, kind, grant_id, client_id, expires_at) VALUES (?, ?, ?, ?, ?)'),
+        getTombstone: db.prepare('SELECT kind, grant_id, client_id, expires_at FROM tombstones WHERE hash = ?'),
         revokeToken: db.prepare('DELETE FROM tokens WHERE token_hash = ? AND client_id = ?'),
         saveGithubUser: db.prepare(`INSERT OR REPLACE INTO github_users
             (user_id, login, access_token, access_expires_at, refresh_token, refresh_expires_at, updated_at)
@@ -160,23 +171,32 @@ export function createStore({ file, key, now = Date.now }) {
      *
      * @param {string} hash
      * @param {'code'|'refresh'} kind
-     * @param {{grant_id: string, expires_at: number}} row the used code's or token's row
+     * @param {{grant_id: string, client_id: string, expires_at: number}} row the used code's or token's row
      */
     function bury(hash, kind, row) {
-        statements.saveTombstone.run(hash, kind, row.grant_id, row.expires_at)
+        statements.saveTombstone.run(hash, kind, row.grant_id, row.client_id, row.expires_at)
     }
 
     /**
      * When `hash` is a used code or rotated refresh token of `kind` presented
      * again, revokes every token of its grant: one of the two holders is not
-     * the legitimate client, and we cannot tell which.
+     * the legitimate client, and we cannot tell which. Logs one line after
+     * the revoke, naming the grant and its client — never the token or its
+     * hash. A failing logger never undoes the revoke (inside a transaction,
+     * a throw would roll it back).
      *
      * @param {string} hash
      * @param {'code'|'refresh'} kind
      */
     function revokeOnReplay(hash, kind) {
         const tombstone = live(statements.getTombstone.get(hash))
-        if (tombstone?.kind === kind) statements.revokeGrant.run(tombstone.grant_id)
+        if (tombstone?.kind !== kind) return
+        const revoked = Number(statements.revokeGrant.run(tombstone.grant_id).changes)
+        try {
+            log(`replay detected: ${REPLAYED[kind]} was sent again; revoked grant ${tombstone.grant_id} of client ${tombstone.client_id} (${revoked} tokens)`)
+        } catch {
+            // the revoke is what protects the user; a lost log line is not worth undoing it
+        }
     }
 
     /**

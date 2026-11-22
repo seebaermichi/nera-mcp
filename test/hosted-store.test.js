@@ -256,6 +256,67 @@ describe('createStore', () => {
         expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })).not.toBeNull()
     })
 
+    describe('logs a detected replay', () => {
+        let lines
+
+        beforeEach(() => {
+            store.close()
+            lines = []
+            store = createStore({ file, key: KEY, now, log: (line) => lines.push(line) })
+        })
+
+        /** Asserts no logged line carries any of these tokens, or their hashes. */
+        function expectNoSecrets(...tokens) {
+            for (const token of tokens) {
+                for (const line of lines) {
+                    expect(line).not.toContain(token)
+                    expect(line).not.toContain(hashToken(token))
+                }
+            }
+        }
+
+        it('once for a used code, with its client and grant and no code or token', () => {
+            const code = store.saveCode({ clientId: 'client-1', userId: 4242, params: PARAMS })
+            const { grantId } = store.takeCode(code)
+            const tokens = store.issueTokens({ clientId: 'client-1', userId: 4242, grantId })
+
+            expect(store.takeCode(code)).toBeNull()
+            expect(lines).toEqual([`replay detected: a used authorization code was sent again; revoked grant ${grantId} of client client-1 (2 tokens)`])
+            expectNoSecrets(code, tokens.accessToken, tokens.refreshToken)
+        })
+
+        it('once for an already rotated refresh token, with its client and grant and no token', () => {
+            const first = store.issueTokens({ clientId: 'client-1', userId: 4242, grantId: 'grant-1' })
+            const second = store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })
+
+            expect(store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })).toBeNull()
+            expect(lines).toEqual(['replay detected: an already rotated refresh token was sent again; revoked grant grant-1 of client client-1 (3 tokens)'])
+            expectNoSecrets(first.accessToken, first.refreshToken, second.accessToken, second.refreshToken)
+        })
+
+        it('never for a code\'s lookup before its use, a legitimate rotation or an unknown code or token', () => {
+            const code = store.saveCode({ clientId: 'client-1', userId: 4242, params: PARAMS })
+            expect(store.getCode(code)).not.toBeNull()
+            const { grantId } = store.takeCode(code)
+            const tokens = store.issueTokens({ clientId: 'client-1', userId: 4242, grantId })
+            expect(store.rotateRefreshToken(tokens.refreshToken, { clientId: 'client-1' })).not.toBeNull()
+            expect(store.rotateRefreshToken('unknown', { clientId: 'client-1' })).toBeNull()
+            expect(store.takeCode('unknown')).toBeNull()
+            expect(store.getCode('unknown')).toBeNull()
+            expect(lines).toEqual([])
+        })
+
+        it('keeps the revoke when the logger throws', () => {
+            store.close()
+            store = createStore({ file, key: KEY, now, log: () => { throw new Error('stderr gone') } })
+            const first = store.issueTokens({ clientId: 'client-1', userId: 4242 })
+            const second = store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })
+
+            expect(store.rotateRefreshToken(first.refreshToken, { clientId: 'client-1' })).toBeNull()
+            expect(store.getAccessToken(second.accessToken)).toBeNull()
+        })
+    })
+
     it('revokes a token of the same client only', () => {
         const tokens = store.issueTokens({ clientId: 'client-1', userId: 1 })
         expect(store.revokeToken(tokens.accessToken, { clientId: 'client-2' })).toBe(false)

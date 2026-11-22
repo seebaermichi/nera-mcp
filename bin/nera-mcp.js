@@ -214,7 +214,7 @@ async function serveHttp() {
             clientSecret: config.githubClientSecret,
             redirectUri: new URL(GITHUB_CALLBACK_PATH, config.issuer).href,
         })
-        store = createStore({ file: config.db, key: config.tokenKey })
+        store = createStore({ file: config.db, key: config.tokenKey, log })
         app = createHostedApp({ issuer: config.issuer, store, github, log, trustProxy }).app
     } catch (error) {
         store?.close()
