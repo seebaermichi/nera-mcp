@@ -24,6 +24,31 @@ const MAX_TARBALL_BYTES = 50 * 1024 * 1024
 const REPO_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/
 
 /**
+ * Reads a response body of at most `maxBytes`: a larger `content-length` is
+ * refused before reading, a body that grows past the cap while it streams is
+ * refused the moment it does.
+ *
+ * @param {Response} response
+ * @param {number} maxBytes
+ * @param {() => Error} tooLarge the error to throw
+ * @returns {Promise<Buffer>}
+ */
+export async function readLimited(response, maxBytes, tooLarge) {
+    if (Number(response.headers.get('content-length')) > maxBytes) {
+        await response.body?.cancel()
+        throw tooLarge()
+    }
+    const chunks = []
+    let size = 0
+    for await (const chunk of response.body ?? []) {
+        size += chunk.length
+        if (size > maxBytes) throw tooLarge()
+        chunks.push(chunk)
+    }
+    return Buffer.concat(chunks)
+}
+
+/**
  * Checks a repository path a model passed: relative, POSIX, no `..`, `.` or
  * empty segments, no backslashes. There is no filesystem to `realpath`
  * against, so the path itself is all there is to check.
@@ -363,19 +388,7 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
          */
         async downloadTarball(repo, ref, { maxBytes = MAX_TARBALL_BYTES } = {}) {
             const { response } = await request('GET', `${repoUrl(repo)}/tarball/${encodeURIComponent(ref)}`, { raw: true })
-            const tooLarge = () => new GitHubError(`The repository ${repo} is larger than the ${maxBytes} bytes a checkout may have.`, { code: 'too_large' })
-            if (Number(response.headers.get('content-length')) > maxBytes) {
-                await response.body?.cancel()
-                throw tooLarge()
-            }
-            const chunks = []
-            let size = 0
-            for await (const chunk of response.body ?? []) {
-                size += chunk.length
-                if (size > maxBytes) throw tooLarge()
-                chunks.push(chunk)
-            }
-            return Buffer.concat(chunks)
+            return readLimited(response, maxBytes, () => new GitHubError(`The repository ${repo} is larger than the ${maxBytes} bytes a checkout may have.`, { code: 'too_large' }))
         },
     }
 }

@@ -36,7 +36,13 @@ export function failureText(run) {
     return tail(run.stderr) || tail(run.stdout) || `exit code ${run.code}`
 }
 
-function countBySeverity(results) {
+/**
+ * How many of the validator's records are errors and how many warnings.
+ *
+ * @param {Array<{severity: string}>} results
+ * @returns {{ errors: number, warnings: number }}
+ */
+export function countBySeverity(results) {
     const errors = results.filter((r) => r.severity === 'error').length
     return { errors, warnings: results.length - errors }
 }

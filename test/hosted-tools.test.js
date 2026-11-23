@@ -46,12 +46,12 @@ function expectError(result, pattern) {
 }
 
 describe('registration', () => {
-    it('offers the read and write tools next to the catalog tools when a user is bound', async () => {
+    it('offers the read, write and validate tools next to the catalog tools when a user is bound', async () => {
         const { tools } = await session.client.listTools()
         expect(tools.map((tool) => tool.name).sort()).toEqual([
-            'delete_page', 'get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page', 'write_file', 'write_page',
+            'delete_page', 'get_site', 'list_plugins', 'list_sites', 'list_starters', 'list_themes', 'read_file', 'read_page', 'validate', 'write_file', 'write_page',
         ])
-        for (const name of ['list_sites', 'get_site', 'read_page', 'read_file']) {
+        for (const name of ['list_sites', 'get_site', 'read_page', 'read_file', 'validate']) {
             expect(tools.find((tool) => tool.name === name).annotations.readOnlyHint).toBe(true)
         }
     })

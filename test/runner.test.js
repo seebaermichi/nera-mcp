@@ -17,6 +17,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
     activateShim(null)
     await env.cleanup()
 })
@@ -113,8 +114,26 @@ describe('createRunner', () => {
         expect(shimmed.stdout).toBe(`${path.join(env.tmp, 'shim')}${path.delimiter}${process.env.PATH}\n`)
     })
 
+    it('gives a run with `env` exactly that environment, nothing of this process\'s', async () => {
+        vi.stubEnv('NERA_MCP_RUNNER_SECRET', 'do-not-pass')
+        const printEnv = ['-e', 'console.log(JSON.stringify(process.env))']
+        const run = await createRunner()('node', printEnv, { cwd: env.site, env: { PATH: process.env.PATH, ONLY: 'this' } })
+        const childEnvironment = JSON.parse(run.stdout)
+        expect(childEnvironment.ONLY).toBe('this')
+        expect(childEnvironment.NERA_MCP_RUNNER_SECRET).toBeUndefined()
+    })
+
+    it('starts the system tar from the PATH, without a shell', async () => {
+        const spawn = vi.fn(() => { throw new Error('stop') })
+        await expect(createRunner({ spawn })('tar', ['-xf', 'a.tar'], { cwd: env.site })).rejects.toThrow('stop')
+        const [file, args, options] = spawn.mock.calls[0]
+        expect(file).toBe('tar')
+        expect(args).toEqual(['-xf', 'a.tar'])
+        expect(options).toMatchObject({ cwd: env.site, shell: false })
+    })
+
     it('refuses any other command', async () => {
-        await expect(createRunner()('sh', ['-c', 'true'], { cwd: env.site })).rejects.toThrow(/nera, npm or node only/)
+        await expect(createRunner()('sh', ['-c', 'true'], { cwd: env.site })).rejects.toThrow(/nera, npm, node or tar only/)
     })
 })
 

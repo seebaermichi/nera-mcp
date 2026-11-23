@@ -61,9 +61,11 @@ export function npmCommand(execPath = process.execPath, own = ownNpm()) {
 }
 
 /**
- * The executable and leading arguments for `nera`, `npm` or `node` in `cwd`.
+ * The executable and leading arguments for `nera`, `npm`, `node` or `tar` in
+ * `cwd`. `tar` is the system's, found on the child's PATH (the hosted
+ * `validate` unpacks a checkout with it).
  *
- * @param {'nera'|'npm'|'node'} command
+ * @param {'nera'|'npm'|'node'|'tar'} command
  * @param {string} cwd
  * @returns {{ file: string, prefix: string[] }}
  * @throws {Error} for any other command
@@ -76,8 +78,10 @@ export function commandFor(command, cwd) {
         return npmCommand()
     case 'node':
         return { file: process.execPath, prefix: [] }
+    case 'tar':
+        return { file: 'tar', prefix: [] }
     default:
-        throw new Error(`Unknown command "${command}": the runner starts nera, npm or node only.`)
+        throw new Error(`Unknown command "${command}": the runner starts nera, npm, node or tar only.`)
     }
 }
 
@@ -235,9 +239,11 @@ export function stopChild(child, { grace = KILL_GRACE_MS, platform = process.pla
 }
 
 /**
- * Creates the function the tools run `nera`, `npm` and `node` through, for
- * commands that finish (`nera new`, `nera build`, `npm install`). Every run
- * gets its arguments as an array and the options of `spawnOptions`. A run is
+ * Creates the function the tools run `nera`, `npm`, `node` and `tar` through,
+ * for commands that finish (`nera new`, `nera build`, `npm install`). Every
+ * run gets its arguments as an array and the options of `spawnOptions`; a run
+ * given `env` gets exactly that environment instead of `childEnv`'s (the
+ * hosted checkout strips it to PATH). A run is
  * stopped (with everything it started) when it exceeds `timeout` or when `signal`
  * aborts — the client cancelled the request, or the server closed.
  *
@@ -246,17 +252,19 @@ export function stopChild(child, { grace = KILL_GRACE_MS, platform = process.pla
  * @param {number} [options.timeout] milliseconds before a run is stopped
  * @param {number} [options.grace] milliseconds between SIGTERM and SIGKILL
  * @param {NodeJS.Platform} [options.platform] injected in tests
- * @returns {(command: 'nera'|'npm'|'node', args: string[], options: { cwd: string, signal?: AbortSignal }) => Promise<{ code: number|null, stdout: string, stderr: string, timedOut: boolean, cancelled: boolean }>}
+ * @returns {(command: 'nera'|'npm'|'node'|'tar', args: string[], options: { cwd: string, signal?: AbortSignal, env?: Record<string, string> }) => Promise<{ code: number|null, stdout: string, stderr: string, timedOut: boolean, cancelled: boolean }>}
  *   `code` is null when the process was stopped or could not start; `stderr` then says why
  */
 export function createRunner({ spawn = nodeSpawn, timeout = DEFAULT_TIMEOUT_MS, grace = KILL_GRACE_MS, platform = process.platform } = {}) {
-    return (command, args, { cwd, signal }) => new Promise((resolve) => {
+    return (command, args, { cwd, signal, env }) => new Promise((resolve) => {
         const { file, prefix } = commandFor(command, cwd)
         if (signal?.aborted) {
             resolve({ code: null, stdout: '', stderr: 'Cancelled before it started.', timedOut: false, cancelled: true })
             return
         }
-        const child = spawn(file, [...prefix, ...args], spawnOptions(cwd, {}, platform))
+        const options = spawnOptions(cwd, {}, platform)
+        if (env) options.env = env
+        const child = spawn(file, [...prefix, ...args], options)
         let stdout = ''
         let stderr = ''
         let timedOut = false

@@ -9,6 +9,7 @@
 import { posix } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { createCheckouts } from '../src/hosted/checkout.js'
 import { createHostedServer } from '../src/hosted/mcp.js'
 import { createRepoClient } from '../src/hosted/repo.js'
 
@@ -305,8 +306,16 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
  * @param {object} [options]
  * @param {(userId: string) => Promise<string>} [options.githubToken]
  * @param {string} [options.userId]
+ * @param {ReturnType<typeof import('../src/hosted/checkout.js').createCheckouts>} [options.checkouts] validate's checkouts; one whose runner and registry refuse every call by default
  */
-export async function connectHosted(github, { githubToken = async () => github.token, userId = 'user-1' } = {}) {
+export async function connectHosted(github, {
+    githubToken = async () => github.token,
+    userId = 'user-1',
+    checkouts = createCheckouts({
+        runner: async (command) => { throw new Error(`${command} is not expected in this test`) },
+        fetch: async () => { throw new Error('the registry is not expected in this test') },
+    }),
+} = {}) {
     const tokenRequests = []
     const server = createHostedServer({
         fetch: async () => { throw new Error('the registry is not expected in this test') },
@@ -316,6 +325,7 @@ export async function connectHosted(github, { githubToken = async () => github.t
             return githubToken(id)
         },
         createRepo: (token) => createRepoClient({ token, fetch: github.fetch, apiUrl: API }),
+        checkouts,
     })
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     const client = new Client({ name: 'nera-mcp-test', version: '0.0.0' })
