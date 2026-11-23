@@ -2,7 +2,9 @@
 // App installations and their repositories, and per repository the git data
 // (blobs, trees, commits, refs) the repo client (src/hosted/repo.js) reads and
 // writes, plus contents (following a symbolic link to a file, as GitHub
-// does), compares, merges and tarballs. It records every request and
+// does), compares, merges, tarballs, the deploy workflow's runs (a run is
+// started on every move of `main` while `main` holds the workflow file) and
+// the GitHub Pages address. It records every request and
 // accepts one token only. `github.intercept` lets a test answer a request
 // itself (a lost race, an outage) before the fake does. `connectHosted`
 // connects a real MCP client to the hosted server, talking to such a fake.
@@ -45,7 +47,7 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
      * @param {boolean} [options.private]
      */
     github.addRepo = (fullName, files, { installation = 1, private: isPrivate = false } = {}) => {
-        const repo = { fullName, private: isPrivate, blobs: new Map(), trees: new Map(), commits: new Map(), refs: new Map(), tarball: Buffer.from(`tarball of ${fullName}`) }
+        const repo = { fullName, private: isPrivate, blobs: new Map(), trees: new Map(), commits: new Map(), refs: new Map(), tarball: Buffer.from(`tarball of ${fullName}`), runs: [], pagesUrl: null }
         github.repos.set(fullName, repo)
         const entries = new Map()
         for (const [path, content] of Object.entries(files)) {
@@ -85,6 +87,39 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
         return repo.commits.get(repo.refs.get(ref) ?? ref)
     }
 
+    let runCounter = 0
+    /**
+     * Adds a run of `.github/workflows/<workflow>` to the repository, newest
+     * first, as GitHub lists them.
+     *
+     * @param {string} fullName
+     * @param {object} run `head_sha` and anything to override (`status`, `conclusion`, `event`, `head_branch`, `path`)
+     */
+    github.addRun = (fullName, run) => {
+        runCounter += 1
+        const added = {
+            id: runCounter,
+            status: 'queued',
+            conclusion: null,
+            event: 'push',
+            head_branch: 'main',
+            path: '.github/workflows/deploy.yml',
+            html_url: `https://github.com/${fullName}/actions/runs/${runCounter}`,
+            created_at: new Date(Date.UTC(2026, 10, 23, 10, 0, runCounter)).toISOString(),
+            ...run,
+        }
+        github.repos.get(fullName).runs.unshift(added)
+        return added
+    }
+
+    /** Moves `branch` to `sha`; a move of `main` starts a deploy run when `main` holds the workflow. */
+    function moveRef(repo, branch, sha) {
+        repo.refs.set(branch, sha)
+        if (branch !== 'main') return
+        const entries = repo.trees.get(repo.commits.get(sha).tree)
+        if (entries.has('.github/workflows/deploy.yml')) github.addRun(repo.fullName, { head_sha: sha })
+    }
+
     /** Adds a commit to `branch` directly, as another client pushing would. */
     github.pushFile = (fullName, branch, path, content, message = 'Pushed elsewhere') => {
         const repo = github.repos.get(fullName)
@@ -95,7 +130,7 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
         repo.trees.set(tree, entries)
         const commit = nextSha()
         repo.commits.set(commit, { tree, parents: [parent], message })
-        repo.refs.set(branch, commit)
+        moveRef(repo, branch, commit)
         return commit
     }
 
@@ -141,7 +176,7 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
             if (!body.force && !isAncestor(repo, repo.refs.get(branch), body.sha)) {
                 return json({ message: 'Update is not a fast forward' }, 422)
             }
-            repo.refs.set(branch, body.sha)
+            moveRef(repo, branch, body.sha)
             return json({ ref: `refs/heads/${branch}`, object: { sha: body.sha } })
         }
         if (method === 'GET' && (match = rest.match(/^git\/commits\/(\w+)$/))) {
@@ -248,8 +283,20 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
             if (github.mergeConflict) return json({ message: 'Merge conflict' }, 409)
             const sha = nextSha()
             repo.commits.set(sha, { tree: repo.commits.get(head).tree, parents: [base, head], message: body.commit_message })
-            repo.refs.set(body.base, sha)
+            moveRef(repo, body.base, sha)
             return json({ sha }, 201)
+        }
+        if (method === 'GET' && (match = rest.match(/^actions\/workflows\/([^/]+)\/runs$/))) {
+            const workflow = `.github/workflows/${decodeURIComponent(match[1])}`
+            const main = repo.commits.get(repo.refs.get('main'))
+            if (!main || !repo.trees.get(main.tree).has(workflow)) return notFound()
+            const filters = ['branch', 'head_sha', 'event'].map((key) => [key, url.searchParams.get(key)]).filter(([, value]) => value !== null)
+            const runs = repo.runs.filter((run) => run.path === workflow
+                && filters.every(([key, value]) => (key === 'branch' ? run.head_branch : run[key]) === value))
+            return listing(runs, url, 'workflow_runs')
+        }
+        if (method === 'GET' && rest === 'pages') {
+            return repo.pagesUrl ? json({ html_url: repo.pagesUrl, status: 'built' }) : notFound()
         }
         if (method === 'GET' && rest.startsWith('tarball/')) {
             return new Response(repo.tarball, { status: 200, headers: { 'Content-Type': 'application/x-gzip', 'Content-Length': String(repo.tarball.length) } })
@@ -307,6 +354,7 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
  * @param {(userId: string) => Promise<string>} [options.githubToken]
  * @param {string} [options.userId]
  * @param {ReturnType<typeof import('../src/hosted/checkout.js').createCheckouts>} [options.checkouts] validate's checkouts; one whose runner and registry refuse every call by default
+ * @param {(ms: number) => Promise<void>} [options.sleep] publish's pause between run lookups; none by default
  */
 export async function connectHosted(github, {
     githubToken = async () => github.token,
@@ -315,10 +363,12 @@ export async function connectHosted(github, {
         runner: async (command) => { throw new Error(`${command} is not expected in this test`) },
         fetch: async () => { throw new Error('the registry is not expected in this test') },
     }),
+    sleep = async () => {},
 } = {}) {
     const tokenRequests = []
     const server = createHostedServer({
         fetch: async () => { throw new Error('the registry is not expected in this test') },
+        sleep,
         userId,
         githubToken: async (id) => {
             tokenRequests.push(id)

@@ -145,7 +145,26 @@ A **site** is a folder under the root (or the root itself) whose `package.json` 
 
 ## Hosted mode (for operators)
 
-`nera-mcp --http` runs the server for MCP clients that cannot start a local process, such as claude.ai and ChatGPT. This section is for whoever runs such a server; there is no public Nera service to connect to yet. For now the hosted server offers only the catalog tools (`list_starters`, `list_themes`, `list_plugins`); it has no folder to work in, so `--root` is refused together with `--http`.
+`nera-mcp --http` runs the server for MCP clients that cannot start a local process, such as claude.ai and ChatGPT. This section is for whoever runs such a server; there is no public Nera service to connect to yet. The hosted server has no folder to work in, so `--root` is refused together with `--http`: the signed-in user's GitHub repository is the working copy.
+
+### Hosted tools
+
+Besides the catalog tools (`list_starters`, `list_themes`, `list_plugins`), a signed-in user gets the site tools, acting as that GitHub user. A **site** is a repository as `owner/name` that the GitHub App reaches with the user's token and whose `package.json` depends on `@nera-static/nera`; any other repository is refused. Paths are relative to the repository root; `..`, absolute paths, backslashes, symbolic links, `.git` and files that can hold secrets (`.env*`, `.npmrc`) are refused.
+
+| Tool | Does |
+| --- | --- |
+| `list_sites`, `get_site` | The user's Nera sites; one site's configuration, folders, theme, plugins, pages and unpublished draft commits |
+| `read_page`, `read_file` | A page with its frontmatter, or a text file, from `nera-draft` while it exists, else from `main` |
+| `write_page`, `write_file`, `delete_page` | One commit per call, with the `message` the model passes, on the draft branch `nera-draft` (created from `main` by the first write) |
+| `validate` | The validator of `nera validate` on a temporary checkout of the draft, as `{ file, line, severity, rule, message }` records |
+| `publish` | Merges `nera-draft` into `main` in one push and deletes it; returns the merge commit, the deploy run and the site's address |
+| `preview` | The site's address, its latest deploy run and the number of unpublished draft commits |
+
+Changes collect on `nera-draft` and deploy only with `publish`. The site's deploy workflow (`.github/workflows/deploy.yml`, as `nera publish` sets it up) runs on pushes to `main` only, so a batch of changes is built and deployed once, which matters for Netlify's build credits. `publish` without unpublished commits pushes nothing. A merge conflict (someone changed `main` in the meantime) is reported with the hint to merge the draft on GitHub. The site's address comes from GitHub Pages, else from `origin` in `config/app.yaml`.
+
+There is no hosted `build`: it would run the site's local plugins, which is user code, on the server. The site's own GitHub Actions run builds it. `validate` runs no code of the site either: it downloads the repository's tarball (at most 50 MB, at most 200 MB unpacked), unpacks it with the system `tar` into a temporary folder, deletes every symbolic link, refuses a configuration (`folders.*`, `theme`), a page `layout` or a Pug `include`/`extends` that leaves the checkout, and runs no npm. When `config/app.yaml` names a theme package, only that package is downloaded from `https://registry.npmjs.org/` (the version the lockfile pins, else the highest match of the `package.json` range or tag; no dependencies, no redirects, at most 20 MB). The checkout is deleted afterwards, whatever happened, and each user runs one checkout at a time (per server process). Needs `tar` on the server's PATH.
+
+### Running it
 
 It is an OAuth 2.1 authorization server in front of a Streamable HTTP endpoint at `/mcp`. Clients register themselves (dynamic client registration) and sign in with PKCE; the sign-in itself is delegated to a GitHub App, so a user only ever logs in at GitHub.
 

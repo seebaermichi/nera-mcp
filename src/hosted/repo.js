@@ -2,10 +2,12 @@
 // repository is the working copy. This client reads files and trees, keeps the
 // draft branch `nera-draft` (every write commits there, so nothing deploys),
 // commits one file change at a time through the Git Data API, merges the
-// draft into `main` (one push, so one deploy) and downloads a tarball for
-// `validate`. It is GitHub plumbing, not Nera logic; the page rules live in
-// src/pages.js. Every call goes through the injected `fetch`, so tests never
-// touch the network, and no message it builds can carry the token.
+// draft into `main` (one push, so one deploy), downloads a tarball for
+// `validate` and reads the deploy workflow's runs and the GitHub Pages
+// address for `publish` and `preview`. It is GitHub plumbing, not Nera logic;
+// the page rules live in src/pages.js. Every call goes through the injected
+// `fetch`, so tests never touch the network, and no message it builds can
+// carry the token.
 import { ToolError } from '../results.js'
 import { GitHubError } from './github.js'
 
@@ -192,6 +194,11 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
         return status !== 422
     }
 
+    /** Deletes the draft branch; nothing happens when it is already gone. */
+    async function deleteDraft(repo) {
+        await request('DELETE', `${repoUrl(repo)}/git/refs/heads/${encodePath(DRAFT_BRANCH)}`, { accept: [404, 422] })
+    }
+
     /** A commit on `head` that changes the one entry `entry` (sha null: deleted). */
     async function commitOn(repo, head, entry, message) {
         const { body: parent } = await request('GET', `${repoUrl(repo)}/git/commits/${head}`)
@@ -372,8 +379,53 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
                 // 204: main already contains every draft commit.
                 result = { sha: status === 204 ? await branchHead(repo, BASE_BRANCH) : body.sha, fastForward: false }
             }
-            await request('DELETE', `${repoUrl(repo)}/git/refs/heads/${encodePath(DRAFT_BRANCH)}`, { accept: [404, 422] })
+            await deleteDraft(repo)
             return result
+        },
+
+        deleteDraft,
+
+        /**
+         * The newest run of a workflow on `main`, null when there is none or
+         * the workflow does not exist.
+         *
+         * @param {string} repo `owner/name`
+         * @param {string} workflow the workflow's file name, e.g. `deploy.yml`
+         * @param {object} [options]
+         * @param {string} [options.sha] only a run of a push of this commit
+         * @returns {Promise<{id: number, status: string, conclusion: string|null, url: string, sha: string, event: string, createdAt: string} | null>}
+         */
+        async latestRun(repo, workflow, { sha } = {}) {
+            const query = new URLSearchParams({ branch: BASE_BRANCH, per_page: '1' })
+            if (sha) {
+                query.set('head_sha', sha)
+                query.set('event', 'push')
+            }
+            const { status, body } = await request('GET', `${repoUrl(repo)}/actions/workflows/${encodeURIComponent(workflow)}/runs?${query}`, { accept: [404] })
+            const run = status === 404 ? null : body?.workflow_runs?.[0]
+            // The filters narrow the list; the run is checked again so another commit is never reported as this one.
+            if (!run || (sha && run.head_sha !== sha)) return null
+            return {
+                id: run.id,
+                status: run.status,
+                conclusion: run.conclusion ?? null,
+                url: run.html_url,
+                sha: run.head_sha,
+                event: run.event,
+                createdAt: run.created_at,
+            }
+        },
+
+        /**
+         * The address GitHub Pages serves the repository at, null when Pages
+         * is not set up for it.
+         *
+         * @param {string} repo `owner/name`
+         * @returns {Promise<string|null>}
+         */
+        async pagesUrl(repo) {
+            const { status, body } = await request('GET', `${repoUrl(repo)}/pages`, { accept: [404] })
+            return status === 404 ? null : (body?.html_url ?? null)
         },
 
         /**

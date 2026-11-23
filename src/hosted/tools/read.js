@@ -7,7 +7,8 @@
 // write tools commit), else from `main`. The page rules are the local mode's
 // (src/pages.js), the folders are core's (`computeFolders`). The site lookup
 // (`createSiteAccess`) and the error wrapper (`hostedTool`) are shared with
-// the write tools (./write.js).
+// the write, validate and publish tools (./write.js, ./validate.js,
+// ./publish.js).
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -195,17 +196,22 @@ export function createSiteAccess(repos) {
         return found
     }
 
+    /** The parsed `config/app.yaml` at `ref` (default: the site's read ref). */
+    async function appConfigAt(target, ref = target.ref) {
+        return parseAppConfig(
+            await readAt(target, `${repoFolder(defaultSettings.folders.config, 'config')}/app.yaml`, 'a file', ref),
+        )
+    }
+
     /** The site's folders and its tree at the read ref. */
     async function siteModel(target) {
-        const { appConfig, appConfigError } = parseAppConfig(
-            await readAt(target, `${repoFolder(defaultSettings.folders.config, 'config')}/app.yaml`, 'a file'),
-        )
+        const { appConfig, appConfigError } = await appConfigAt(target)
         const tree = await target.client.readTree(target.site, target.ref)
         const folders = treeFolders(appConfig, tree.entries)
         return { appConfig, appConfigError, folders, tree }
     }
 
-    return { openSite, readAt, siteModel }
+    return { openSite, readAt, appConfigAt, siteModel }
 }
 
 /**
