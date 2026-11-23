@@ -127,8 +127,10 @@ export function registerHostedPublishTools(server, { repos, sleep = sleepFor }) 
             return nothingPublished(target, `The draft of "${target.site}" held no unpublished commits, so it was deleted.`)
         }
         const merged = await target.client.mergeDraft(target.site, message?.trim() || `Publish the changes from ${DRAFT_BRANCH}`)
-        // null: another call published the draft in the meantime.
-        if (!merged) return nothingPublished(target, `The draft of "${target.site}" was published by another call in the meantime.`)
+        // null: the draft is gone; not pushed: main already held it. Either way another call published it in the meantime.
+        if (!merged || !merged.pushed) {
+            return nothingPublished(target, `The changes of "${target.site}" are already live on ${BASE_BRANCH}, or were published by another call in the meantime.`)
+        }
         const run = await runFor(target, merged.sha)
         const url = await siteUrl(target)
         const runSentence = run

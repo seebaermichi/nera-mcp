@@ -218,6 +218,18 @@ describe('commitFile', () => {
         expect(github.commit(SITE, DRAFT_BRANCH).message).toBe('Remove the home page')
     })
 
+    it('keeps an executable file executable and writes new and regular files as regular files', async () => {
+        github.addRepo('octo/tools', { 'bin/deploy.sh': { content: '#!/bin/sh\n', mode: '100755' }, 'README.md': '# Tools\n' })
+        await client.ensureDraft('octo/tools')
+        await client.commitFile('octo/tools', { path: 'bin/deploy.sh', content: '#!/bin/sh\necho hi\n', message: 'Say hi' })
+        await client.commitFile('octo/tools', { path: 'README.md', content: '# Tools!\n', message: 'Shout' })
+        await client.commitFile('octo/tools', { path: 'bin/new.sh', content: '#!/bin/sh\n', message: 'Add new' })
+        expect(github.files('octo/tools', DRAFT_BRANCH)['bin/deploy.sh']).toBe('#!/bin/sh\necho hi\n')
+        expect(github.mode('octo/tools', DRAFT_BRANCH, 'bin/deploy.sh')).toBe('100755')
+        expect(github.mode('octo/tools', DRAFT_BRANCH, 'README.md')).toBe('100644')
+        expect(github.mode('octo/tools', DRAFT_BRANCH, 'bin/new.sh')).toBe('100644')
+    })
+
     it('refuses an empty message and an escaping path', async () => {
         github.requests.length = 0
         await expect(client.commitFile(SITE, { path: 'pages/a.md', content: 'a', message: ' ' })).rejects.toThrow(/commit message is empty/)
@@ -258,7 +270,7 @@ describe('mergeDraft', () => {
         await client.commitFile(SITE, { path: 'pages/a.md', content: 'a\n', message: 'Add a' })
         await client.commitFile(SITE, { path: 'pages/b.md', content: 'b\n', message: 'Add b' })
         const head = github.repos.get(SITE).refs.get(DRAFT_BRANCH)
-        expect(await client.mergeDraft(SITE, 'Publish')).toEqual({ sha: head, fastForward: true })
+        expect(await client.mergeDraft(SITE, 'Publish')).toEqual({ sha: head, fastForward: true, pushed: true })
         expect(github.repos.get(SITE).refs.get('main')).toBe(head)
         expect(github.repos.get(SITE).refs.has(DRAFT_BRANCH)).toBe(false)
         expect(github.requests.filter(({ method, path }) => method === 'PATCH' && path.endsWith('/heads/main'))).toHaveLength(1)
@@ -269,7 +281,7 @@ describe('mergeDraft', () => {
         await client.commitFile(SITE, { path: 'pages/a.md', content: 'a\n', message: 'Add a' })
         github.pushFile(SITE, 'main', 'README.md', 'readme\n')
         const result = await client.mergeDraft(SITE, 'Publish the draft')
-        expect(result.fastForward).toBe(false)
+        expect(result).toMatchObject({ fastForward: false, pushed: true })
         expect(github.repos.get(SITE).refs.get('main')).toBe(result.sha)
         expect(github.commit(SITE, 'main').message).toBe('Publish the draft')
         expect(github.repos.get(SITE).refs.has(DRAFT_BRANCH)).toBe(false)
@@ -283,6 +295,35 @@ describe('mergeDraft', () => {
         const error = await rejection(client.mergeDraft(SITE, 'Publish'))
         expect(error).toMatchObject({ code: 'merge_conflict', status: 409 })
         expect(github.repos.get(SITE).refs.has(DRAFT_BRANCH)).toBe(true)
+    })
+
+    it('pushes nothing when main already is the draft, as after a racing publish', async () => {
+        await client.ensureDraft(SITE)
+        await client.commitFile(SITE, { path: 'pages/a.md', content: 'a\n', message: 'Add a' })
+        const head = github.repos.get(SITE).refs.get(DRAFT_BRANCH)
+        github.repos.get(SITE).refs.set('main', head)
+        github.requests.length = 0
+        expect(await client.mergeDraft(SITE, 'Publish')).toEqual({ sha: head, fastForward: false, pushed: false })
+        expect(github.requests.filter(({ method, path }) => method === 'PATCH' || path.endsWith('/merges'))).toEqual([])
+        expect(github.repos.get(SITE).refs.has(DRAFT_BRANCH)).toBe(false)
+    })
+
+    it('reports no push when the merge API finds nothing to merge (204)', async () => {
+        await client.ensureDraft(SITE)
+        await client.commitFile(SITE, { path: 'pages/a.md', content: 'a\n', message: 'Add a' })
+        const draft = github.repos.get(SITE).refs.get(DRAFT_BRANCH)
+        // A racing publish merged the draft between this call's read of main and its fast-forward.
+        let merged
+        interceptFirst(1, 'PATCH', `/repos/${SITE}/git/refs/heads/main`, () => {
+            const repo = github.repos.get(SITE)
+            merged = 'f'.repeat(40)
+            repo.commits.set(merged, { tree: repo.commits.get(draft).tree, parents: [repo.refs.get('main'), draft], message: 'Their publish' })
+            repo.refs.set('main', merged)
+            return undefined // the fake now answers 422: not a fast-forward, and the merge API 204
+        })
+        expect(await client.mergeDraft(SITE, 'Publish')).toEqual({ sha: merged, fastForward: false, pushed: false })
+        expect(github.commit(SITE, 'main').message).toBe('Their publish')
+        expect(github.repos.get(SITE).refs.has(DRAFT_BRANCH)).toBe(false)
     })
 
     it('returns null when there is no draft', async () => {

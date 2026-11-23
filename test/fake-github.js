@@ -41,7 +41,7 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
      * Adds a repository whose `main` holds `files` in one commit.
      *
      * @param {string} fullName `owner/name`
-     * @param {Record<string, string|{symlink: string}>} files path → content, or a symbolic link to `symlink` (relative to the link's folder)
+     * @param {Record<string, string|{symlink: string}|{content: string, mode: string}>} files path → content, a symbolic link to `symlink` (relative to the link's folder), or content with a git mode (`100755`: executable)
      * @param {object} [options]
      * @param {number} [options.installation] the installation that reaches it
      * @param {boolean} [options.private]
@@ -51,9 +51,9 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
         github.repos.set(fullName, repo)
         const entries = new Map()
         for (const [path, content] of Object.entries(files)) {
-            entries.set(path, typeof content === 'object'
-                ? { sha: github.addBlob(fullName, content.symlink), mode: SYMLINK_MODE }
-                : { sha: github.addBlob(fullName, content), mode: '100644' })
+            if (typeof content === 'string') entries.set(path, { sha: github.addBlob(fullName, content), mode: '100644' })
+            else if ('symlink' in content) entries.set(path, { sha: github.addBlob(fullName, content.symlink), mode: SYMLINK_MODE })
+            else entries.set(path, { sha: github.addBlob(fullName, content.content), mode: content.mode })
         }
         const tree = nextSha()
         repo.trees.set(tree, entries)
@@ -79,6 +79,12 @@ export function fakeGitHub({ token = 'ghu_secret_token' } = {}) {
         const files = {}
         for (const [path, { sha }] of repo.trees.get(commit.tree)) files[path] = repo.blobs.get(sha).toString('utf8')
         return files
+    }
+
+    /** The git mode of `path` on `ref` (a branch or commit). */
+    github.mode = (fullName, ref, path) => {
+        const repo = github.repos.get(fullName)
+        return repo.trees.get(repo.commits.get(repo.refs.get(ref) ?? ref).tree).get(path)?.mode
     }
 
     /** The commit `ref` points at, as stored. */

@@ -22,6 +22,9 @@ const PER_PAGE = 100
 const MAX_PAGES = 10
 /** The default cap on a downloaded tarball. */
 const MAX_TARBALL_BYTES = 50 * 1024 * 1024
+/** git's modes of a regular and of an executable file. */
+const FILE_MODE = '100644'
+const EXECUTABLE_MODE = '100755'
 /** `owner/name` as GitHub allows them: no slashes, dots or spaces where they could leave the API path. */
 const REPO_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/
 
@@ -199,8 +202,23 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
         await request('DELETE', `${repoUrl(repo)}/git/refs/heads/${encodePath(DRAFT_BRANCH)}`, { accept: [404, 422] })
     }
 
-    /** A commit on `head` that changes the one entry `entry` (sha null: deleted). */
-    async function commitOn(repo, head, entry, message) {
+    /**
+     * The mode a file written at `path` on `head` gets: an executable file
+     * stays executable (`100755`), anything else — a new file, a regular one —
+     * is a regular file (`100644`). A tree too large for one listing
+     * (`truncated`, far beyond any site) yields `100644` for files it misses.
+     */
+    async function fileMode(repo, head, path) {
+        const { body } = await request('GET', `${repoUrl(repo)}/git/trees/${head}?recursive=1`)
+        const existing = body.tree.find((candidate) => candidate.path === path && candidate.type === 'blob')
+        return existing?.mode === EXECUTABLE_MODE ? EXECUTABLE_MODE : FILE_MODE
+    }
+
+    /** A commit on `head` that changes the one file `file` to `blob` (null: deleted). */
+    async function commitOn(repo, head, file, blob, message) {
+        const entry = blob === null
+            ? { path: file, mode: FILE_MODE, type: 'blob', sha: null }
+            : { path: file, mode: await fileMode(repo, head, file), type: 'blob', sha: blob }
         const { body: parent } = await request('GET', `${repoUrl(repo)}/git/commits/${head}`)
         const { body: tree } = await request('POST', `${repoUrl(repo)}/git/trees`, {
             body: { base_tree: parent.tree.sha, tree: [entry] },
@@ -322,7 +340,9 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
          * Commits one file change to the draft branch, which must exist
          * (`ensureDraft`): blob → tree → commit → ref update. When the ref
          * update loses a race (the branch moved), the commit is made once more
-         * on the new head; a second lost race is an error.
+         * on the new head; a second lost race is an error. A file that exists
+         * keeps its mode (an executable stays executable), a new one is a
+         * regular file.
          *
          * @param {string} repo `owner/name`
          * @param {object} change
@@ -341,13 +361,12 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
                 })
                 blob = body.sha
             }
-            const entry = { path: file, mode: '100644', type: 'blob', sha: blob }
             for (let attempt = 0; attempt < 2; attempt += 1) {
                 const head = await branchHead(repo, DRAFT_BRANCH)
                 if (!head) {
                     throw new GitHubError(`The branch ${DRAFT_BRANCH} of ${repo} does not exist.`, { status: 404 })
                 }
-                const sha = await commitOn(repo, head, entry, message)
+                const sha = await commitOn(repo, head, file, blob, message)
                 if (await moveBranch(repo, DRAFT_BRANCH, sha)) return { sha }
             }
             throw new GitHubError(`The branch ${DRAFT_BRANCH} of ${repo} changed twice while committing ${file}. Try the change again.`, { code: 'conflict', status: 422 })
@@ -356,18 +375,26 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
         /**
          * Brings the draft into `main` — a fast-forward when `main` has not
          * moved, else a merge commit; either way one push to `main` — and
-         * deletes the draft.
+         * deletes the draft. `pushed` says whether this call moved `main`.
+         * It is false when a racing publish put the draft live first: `main`'s
+         * sha read before the merge is already the draft's, or the merge API
+         * answers 204 (nothing to merge). A push that did not happen is never
+         * reported as one.
          *
          * @param {string} repo `owner/name`
          * @param {string} message the merge commit's message, when one is needed
-         * @returns {Promise<{sha: string, fastForward: boolean} | null>} null when there is no draft
+         * @returns {Promise<{sha: string, fastForward: boolean, pushed: boolean} | null>}
+         *     `sha` is `main`'s head afterwards; null when there is no draft
          */
         async mergeDraft(repo, message) {
             const draft = await branchHead(repo, DRAFT_BRANCH)
             if (!draft) return null
+            const before = await branchHead(repo, BASE_BRANCH)
             let result
-            if (await moveBranch(repo, BASE_BRANCH, draft)) {
-                result = { sha: draft, fastForward: true }
+            if (before === draft) {
+                result = { sha: draft, fastForward: false, pushed: false }
+            } else if (await moveBranch(repo, BASE_BRANCH, draft)) {
+                result = { sha: draft, fastForward: true, pushed: true }
             } else {
                 const { status, body } = await request('POST', `${repoUrl(repo)}/merges`, {
                     body: { base: BASE_BRANCH, head: DRAFT_BRANCH, commit_message: message },
@@ -376,8 +403,10 @@ export function createRepoClient({ token, fetch = globalThis.fetch, apiUrl = 'ht
                 if (status === 409) {
                     throw new GitHubError(`The draft of ${repo} conflicts with changes made to ${BASE_BRANCH} in the meantime. Resolve it on GitHub (merge ${DRAFT_BRANCH} into ${BASE_BRANCH}).`, { code: 'merge_conflict', status })
                 }
-                // 204: main already contains every draft commit.
-                result = { sha: status === 204 ? await branchHead(repo, BASE_BRANCH) : body.sha, fastForward: false }
+                // 204: main already contains every draft commit, so this call merged nothing.
+                result = status === 204
+                    ? { sha: await branchHead(repo, BASE_BRANCH), fastForward: false, pushed: false }
+                    : { sha: body.sha, fastForward: false, pushed: true }
             }
             await deleteDraft(repo)
             return result

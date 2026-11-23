@@ -126,6 +126,31 @@ describe('publish', () => {
         expect(pushesToMain()).toBe(1)
     })
 
+    it('reports published: false when a racing publish put the draft live after this call counted it', async () => {
+        await writeThree()
+        const drafted = draftHead()
+        let counted = false
+        github.intercept = (request) => {
+            if (request.path.includes('/compare/')) counted = true
+            else if (counted && request.method === 'GET' && request.path.endsWith('/git/ref/heads/main')) {
+                // The other call's fast-forward of main to the draft, with the deploy run its push starts.
+                counted = false
+                repo().refs.set('main', drafted)
+                github.addRun(SITE, { head_sha: drafted })
+            }
+            return undefined
+        }
+
+        const result = await session.call('publish', { site: SITE })
+        expect(result.isError).toBeFalsy()
+        expect(result.structuredContent).toMatchObject({ published: false, commits: 0, commit: null, run: { sha: drafted } })
+        expect(textOf(result)).toMatch(/The changes of "octo\/site" are already live on main, or were published by another call in the meantime\. Nothing was pushed to main/)
+        expect(writes().filter(({ path }) => path.endsWith('/heads/main') || path.endsWith('/merges'))).toEqual([])
+        expect(pushesToMain()).toBe(1)
+        expect(mainSha()).toBe(drafted)
+        expect(draftHead()).toBeUndefined()
+    })
+
     it('pushes nothing without a draft and reports the latest run, the address from origin without Pages', async () => {
         repo().pagesUrl = null
         const old = github.addRun(SITE, { head_sha: mainHead, status: 'completed', conclusion: 'success' })

@@ -67,6 +67,59 @@ describe('registration', () => {
     })
 })
 
+describe('resources and prompts', () => {
+    /** A client of a hosted server without a user, serving `docsFile` and the catalogs from `fetch`. */
+    async function connectBare(options) {
+        const server = createHostedServer(options)
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+        const client = new Client({ name: 'nera-mcp-test', version: '0.0.0' })
+        await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+        return client
+    }
+
+    it('offers the docs and the three catalogs as resources, and no AGENTS.md', async () => {
+        const { resources } = await session.client.listResources()
+        expect(resources.map((resource) => resource.uri).sort()).toEqual([
+            'nera://catalog/plugins', 'nera://catalog/starters', 'nera://catalog/themes', 'nera://docs/llms-full.txt',
+        ])
+        const { resourceTemplates } = await session.client.listResourceTemplates()
+        expect(resourceTemplates).toEqual([])
+    })
+
+    it('serves the docs file and the catalogs through the local functions, also without a user', async () => {
+        const dir = fs.mkdtempSync(`${os.tmpdir()}/nera-mcp-hosted-docs-`)
+        try {
+            fs.writeFileSync(`${dir}/llms-full.txt`, '# Nera\n\nAll the docs.\n')
+            const objects = [{ package: { name: '@nera-static/plugin-feed', version: '1.0.0', description: 'Atom feed' } }]
+            const client = await connectBare({ docsFile: `${dir}/llms-full.txt`, fetch: async () => ({ ok: true, status: 200, json: async () => ({ objects }) }) })
+            const docs = await client.readResource({ uri: 'nera://docs/llms-full.txt' })
+            expect(docs.contents).toEqual([{ uri: 'nera://docs/llms-full.txt', mimeType: 'text/markdown', text: '# Nera\n\nAll the docs.\n' }])
+            const plugins = await client.readResource({ uri: 'nera://catalog/plugins' })
+            expect(JSON.parse(plugins.contents[0].text).plugins.map((item) => item.name)).toEqual(['feed'])
+            expect(client.getServerCapabilities().prompts).toBeUndefined()
+            await client.close()
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
+    it('offers add_page and put_site_online, worded for write_page, validate and publish', async () => {
+        const { prompts } = await session.client.listPrompts()
+        expect(prompts.map((prompt) => prompt.name).sort()).toEqual(['add_page', 'put_site_online'])
+        for (const name of ['add_page', 'put_site_online']) {
+            const { messages } = await session.client.getPrompt({ name, arguments: { site: SITE } })
+            const text = messages[0].content.text
+            expect(text).toContain('`octo/site`')
+            expect(text).toMatch(/nera-draft/)
+            expect(text).toMatch(/Call validate[\s\S]*call publish/i)
+            expect(text).not.toMatch(/\bbuild\b|create_site|nera:\/\/site/)
+        }
+        const { messages } = await session.client.getPrompt({ name: 'add_page', arguments: {} })
+        expect(messages[0].content.text).toMatch(/write_page[\s\S]*validate[\s\S]*publish/)
+        expect(messages[0].content.text).toContain('Call list_sites')
+    })
+})
+
 describe('list_sites', () => {
     it('lists the reachable repositories that are Nera sites, across installations', async () => {
         github.addRepo('octo/notes', { 'README.md': '# Notes\n' })

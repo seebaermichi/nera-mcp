@@ -53,12 +53,14 @@ function decodeSite(site) {
 }
 
 /**
- * Registers the docs, the three catalogs and each site's `AGENTS.md`.
+ * Registers the resources that need no folder: the docs and the three
+ * catalogs. The hosted mode offers these alone; a site's `AGENTS.md` is its
+ * `read_file` there.
  *
  * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
- * @param {{ root: string, fetch: typeof fetch, docsFile?: string }} ctx
+ * @param {{ fetch: typeof fetch, docsFile?: string }} ctx
  */
-export function registerResources(server, ctx) {
+export function registerDocsResources(server, ctx) {
     const docsFile = ctx.docsFile ?? BUNDLED_DOCS
 
     server.registerResource('nera_docs', 'nera://docs/llms-full.txt', {
@@ -84,6 +86,16 @@ export function registerResources(server, ctx) {
             return text(uri, 'application/json', JSON.stringify({ [kindName]: items }, null, 2))
         }))
     }
+}
+
+/**
+ * Registers the docs, the three catalogs and each site's `AGENTS.md`.
+ *
+ * @param {import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
+ * @param {{ root: string, fetch: typeof fetch, docsFile?: string }} ctx
+ */
+export function registerResources(server, ctx) {
+    registerDocsResources(server, ctx)
 
     const readAgents = resource(async (uri, { site = '.' } = {}) => {
         const resolved = await resolveSite(ctx, decodeSite(site))
