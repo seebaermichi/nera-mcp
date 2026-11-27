@@ -18,7 +18,8 @@
         "prepack": "node scripts/fetch-docs.js && node scripts/sync-skill.js",
         "mcpb": "node scripts/fetch-docs.js && node scripts/build-mcpb.js",
         "skill": "node scripts/sync-skill.js",
-        "version": "node scripts/sync-version.js && git add .claude-plugin/plugin.json"
+        "version": "node scripts/sync-version.js && git add .claude-plugin/plugin.json",
+        "prepare": "husky"
     },
     "keywords": [
         "nera",
@@ -56,6 +57,7 @@
     "devDependencies": {
         "@anthropic-ai/mcpb": "^2.1.2",
         "eslint": "^10.15.0",
+        "husky": "^9.1.7",
         "vitest": "^5.1.1"
     },
     "bin": {
